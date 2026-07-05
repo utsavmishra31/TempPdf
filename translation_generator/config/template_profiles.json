@@ -26,7 +26,7 @@
         "passport_issue_or_sentence_date": "<<2_DATE>>",
         "purpose": "<<TYPE>>",
         "reference_no": "<<REFERENCE_NO>>",
-        "sign_name": "<<SECTION_OFFICER_SIGN>>",
+        "sign_name": "<<OFF_SIGN>>",
         "apostille_date": "<<APOSTILLE_DATE>>",
         "stamp_no": "<<0I_NO>>"
       }
@@ -76,7 +76,7 @@
         "location": "<<LOCATION>>",
         "designation": "<<DESIGNATION>>",
         "reference_no": "<<REFERENCE_NO>>",
-        "apostille_sign": "<<SECTION_OFFICER_SIGN>>",
+        "apostille_sign": "<<OFF_SIGN>>",
         "signed_by": "<<SIGNED_BY>>",
         "apostille_date": "<<APOSTILLE_DATE>>",
         "stamp_no": "<<0I_NO>>"
@@ -101,7 +101,7 @@
         "passport_no": "<<PASSPORT>>",
         "certificate_date": "<<DATE>>",
         "reference_no": "<<REFERENCE_NO>>",
-        "sign_name": "<<SECTION_OFFICER_SIGN>>",
+        "sign_name": "<<OFF_SIGN>>",
         "signed_by": "<<SIGNED_BY>>",
         "apostille_date": "<<APOSTILLE_DATE>>",
         "stamp_no": "<<0I_NO>>"
