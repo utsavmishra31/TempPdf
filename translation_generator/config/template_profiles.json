@@ -1,0 +1,86 @@
+{
+  "doc_types": {
+    "pcc": {
+      "active": true,
+      "template_candidates": [
+        "templates/pcc_template.docx",
+        "templates/pcctemp.docx",
+        "templates/PCC.docx"
+      ],
+      "required_fields": [
+        "cert_no",
+        "cert_date",
+        "name",
+        "father_name",
+        "passport_no",
+        "passport_issue_or_sentence_date",
+        "purpose"
+      ],
+      "field_to_placeholder": {
+        "cert_no": "<<CERT_NO>>",
+        "cert_date": "<<1_DATE>>",
+        "name": "<<NAME>>",
+        "relation_text_es": "<<RELATION>>",
+        "father_name": "<<FATHER>>",
+        "passport_no": "<<PASSPORT>>",
+        "passport_issue_or_sentence_date": "<<2_DATE>>",
+        "purpose": "<<TYPE>>",
+        "reference_no": "<<REFERENCE_NO>>",
+        "sign_name": "<<SECTION_OFFICER_SIGN>>",
+        "apostille_date": "<<APOSTILLE_DATE>>",
+        "stamp_no": "<<0I_NO>>"
+      }
+    },
+    "birth": {
+      "active": true,
+      "template_candidates": [
+        "templates/birth_template.docx",
+        "templates/BIRTH.docx"
+      ],
+      "required_fields": [
+        "register_no",
+        "serial_no",
+        "place",
+        "tehsil",
+        "district",
+        "year",
+        "child_name",
+        "sex",
+        "father_name",
+        "mother_name",
+        "birth_date",
+        "birth_place",
+        "reg_date"
+      ],
+      "field_to_placeholder": {
+        "register_no": "<<REGISTER_NO>>",
+        "serial_no": "<<SR_NO>>",
+        "place": "<<PLACE>>",
+        "tehsil": "<<TEHSIL>>",
+        "district": "<<DISTRICT>>",
+        "year": "<<YEAR>>",
+        "child_name": "<<NAME>>",
+        "sex": "<<SEX>>",
+        "father_name": "<<FATHER>>",
+        "grandfather_name": "<<GRANDFATHER>>",
+        "mother_name": "<<MOTHER>>",
+        "birth_date": "<<BIRTH_DATE>>",
+        "birth_place": "<<BIRTH_PLACE>>",
+        "reg_date": "<<REG_DATE>>",
+        "address": "<<ADDRESS_OF_PARENTS>>",
+        "permanent_address": "<<PERMANENT_ADDRESS_OF_PARENTS>>",
+        "issue_date": "<<ISSUE_DATE>>",
+        "print_date": "<<PRINT_DATE>>",
+        "signature_name": "<<SIGNATURE>>",
+        "signature_date": "<<DATE>>",
+        "location": "<<LOCATION>>",
+        "designation": "<<DESIGNATION>>",
+        "reference_no": "<<REFERENCE_NO>>",
+        "apostille_sign": "<<SECTION_OFFICER_SIGN>>",
+        "signed_by": "<<SIGNED_BY>>",
+        "apostille_date": "<<APOSTILLE_DATE>>",
+        "stamp_no": "<<0I_NO>>"
+      }
+    }
+  }
+}
