@@ -3,10 +3,17 @@
     "pcc": {
       "active": true,
       "template_candidates": [
-        "templates/pcc_template.docx",
-        "templates/pcctemp.docx",
-        "templates/PCC.docx"
+        "templates/pccChandigarh.docx",
+        "templates/pccjalandhar.docx"
       ],
+      "template_routes": {
+        "chandigarh": [
+          "templates/pccChandigarh.docx"
+        ],
+        "jalandhar": [
+          "templates/pccjalandhar.docx"
+        ]
+      },
       "required_fields": [
         "cert_no",
         "cert_date",

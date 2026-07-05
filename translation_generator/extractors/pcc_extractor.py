@@ -66,6 +66,14 @@ def _pick_last_match(text: str, pattern: str) -> tuple[str, dict[str, str | floa
     return value, _meta_from_find(pattern, value, snippet)
 
 
+def _is_jalandhar_pcc(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", text or "")
+    return bool(
+        re.search(r"regional\s+passport\s+office\s*[,\-]?\s*jalandhar\b", compact, flags=re.IGNORECASE)
+        or re.search(r"\bRPO\s*,?\s*JALANDHAR\b", compact, flags=re.IGNORECASE)
+    )
+
+
 def _extract_main_pcc_record(text: str) -> dict[str, str | dict[str, dict[str, str | float]]]:
     compact = re.sub(r"\s+", " ", text)
     pattern = (
@@ -151,6 +159,63 @@ def _extract_main_pcc_record(text: str) -> dict[str, str | dict[str, dict[str, s
     }
 
 
+def _extract_jalandhar_main_pcc_record(text: str) -> dict[str, str | dict[str, dict[str, str | float]]]:
+    compact = re.sub(r"\s+", " ", text)
+    pattern = (
+        r"there is no adverse information against\s+(?:Mr\.?|Ms\.?|Mrs\.?)?\s*"
+        r"([A-Za-z\s]+?)\s+(S/o|D/o|W/o)\s+([A-Za-z\s]+?),\s*holder of Indian Passport No\s*([A-Z0-9][A-Z0-9\s]{4,20}),"
+        r"\s*issued at\s*JALANDHAR\s*,\s*on\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})"
+        r".*?ineligible\s*(?:\|\s*)?for\s*([A-Za-z/\-\s]+?)\s+for"
+    )
+    matches = list(re.finditer(pattern, compact, flags=re.IGNORECASE | re.DOTALL))
+    if not matches:
+        return {
+            "name": "",
+            "relation_text": "",
+            "father_name": "",
+            "passport_no": "",
+            "passport_issue_or_sentence_date": "",
+            "purpose": "",
+            "debug": {},
+        }
+
+    match = matches[-1]
+    name = _clean_value(match.group(1)).upper()
+    relation = _clean_value(match.group(2))
+    father = _clean_value(match.group(3)).upper()
+    passport_no = _normalize_doc_number(match.group(4))
+    issue_date = _clean_value(match.group(5))
+    purpose = _clean_value(match.group(6)).upper()
+    snippet = _snippet(compact, match.start(), match.end())
+
+    debug = {}
+    for key, value in {
+        "name": name,
+        "relation_text": relation,
+        "father_name": father,
+        "passport_no": passport_no,
+        "passport_issue_or_sentence_date": issue_date,
+        "purpose": purpose,
+    }.items():
+        debug[key] = {
+            "value": value,
+            "confidence": 0.9,
+            "method": "jalandhar_ocr_regex",
+            "pattern": pattern,
+            "source_snippet": snippet,
+        }
+
+    return {
+        "name": name,
+        "relation_text": relation,
+        "father_name": father,
+        "passport_no": passport_no,
+        "passport_issue_or_sentence_date": issue_date,
+        "purpose": purpose,
+        "debug": debug,
+    }
+
+
 def _extract_apostille_fields(text: str) -> tuple[str, str, str, dict[str, dict[str, str | float]]]:
     # Labelled reference patterns (Spanish/English)
     reference_no, ref_meta = _pick_last_match(
@@ -167,6 +232,18 @@ def _extract_apostille_fields(text: str) -> tuple[str, str, str, dict[str, dict[
             if reference_no.startswith("HCH") and not reference_no.startswith("CHCH"):
                 reference_no = "C" + reference_no
             ref_meta = _meta_from_find("standalone_ref_code", reference_no, m.group(0), 0.80)
+
+    if not reference_no and _is_jalandhar_pcc(text):
+        reference_pattern = r"\bN\s*[°ºoO]?\s*([A-Z]{2,5}[A-Z0-9O]{8,12})\b"
+        reference_match = re.search(reference_pattern, text, flags=re.IGNORECASE)
+        if reference_match:
+            reference_no = reference_match.group(1)
+            ref_meta = _meta_from_find(
+                reference_pattern,
+                reference_no,
+                _snippet(text, reference_match.start(), reference_match.end()),
+                0.88,
+            )
 
     sign_patterns = [
         # Name in parentheses immediately before/after 'Section Officer' or 'Attestation'
@@ -222,6 +299,17 @@ def _extract_apostille_fields(text: str) -> tuple[str, str, str, dict[str, dict[
                 stamp_meta = {**meta, "value": stamp_no, "confidence": 0.9}
                 break
 
+    if not stamp_no and _is_jalandhar_pcc(text):
+        stamp_match = re.search(r"\b([0-9]{7})\b", text)
+        if stamp_match:
+            stamp_no = stamp_match.group(1)
+            stamp_meta = _meta_from_find(
+                "jalandhar_standalone_stamp_digits",
+                stamp_no,
+                _snippet(text, stamp_match.start(), stamp_match.end()),
+                0.78,
+            )
+
     signed_by = ""
     signed_by_meta = _fallback_meta("")
     signed_by_patterns = [
@@ -238,6 +326,21 @@ def _extract_apostille_fields(text: str) -> tuple[str, str, str, dict[str, dict[
             signed_by = re.split(r"\b(?:ACTUANDO|ACTING)\b", signed_by, maxsplit=1)[0].strip()
             signed_by_meta = {**meta, "value": signed_by, "confidence": 0.9}
             break
+
+    if _is_jalandhar_pcc(text):
+        jalandhar_sign_pattern = r"has\s+been\s+signed\s+by\s+([A-Z][A-Za-z]{2,}\s+[A-Z][A-Za-z]{2,})\b"
+        jalandhar_sign_match = re.search(jalandhar_sign_pattern, text, flags=re.IGNORECASE)
+        if jalandhar_sign_match:
+            sign_name = _clean_value(jalandhar_sign_match.group(1)).upper()
+            sign_meta = _meta_from_find(
+                jalandhar_sign_pattern,
+                sign_name,
+                _snippet(text, jalandhar_sign_match.start(), jalandhar_sign_match.end()),
+                0.9,
+            )
+        elif signed_by and (not sign_name or sign_name == "WASH PAL"):
+            sign_name = signed_by
+            sign_meta = {**signed_by_meta, "value": sign_name, "method": "jalandhar_signed_by"}
 
     apostille_date = ""
     apostille_date_meta = _fallback_meta("")
@@ -380,6 +483,8 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
                 break
 
     main_record = _extract_main_pcc_record(main_text)
+    if _is_jalandhar_pcc(text) and not str(main_record.get("name", "")).strip():
+        main_record = _extract_jalandhar_main_pcc_record(text)
     for key in [
         "name",
         "relation_text",

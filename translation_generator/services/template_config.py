@@ -43,13 +43,21 @@ def get_required_fields(config: dict[str, Any], doc_type: str) -> list[str]:
     return list(profile.get("required_fields") or [])
 
 
-def resolve_template_path(base_dir: Path, config: dict[str, Any], doc_type: str) -> Path | None:
-    doc_types = config.get("doc_types") or {}
-    profile = doc_types.get(doc_type, {})
-    candidates = profile.get("template_candidates") or []
-
+def _first_existing_template(base_dir: Path, candidates: list[str]) -> Path | None:
     for rel_path in candidates:
         candidate = base_dir / rel_path
         if candidate.exists():
             return candidate
     return None
+
+
+def resolve_template_path(base_dir: Path, config: dict[str, Any], doc_type: str, template_route: str | None = None) -> Path | None:
+    doc_types = config.get("doc_types") or {}
+    profile = doc_types.get(doc_type, {})
+    if template_route:
+        routes = profile.get("template_routes") or {}
+        routed_path = _first_existing_template(base_dir, list(routes.get(template_route) or []))
+        if routed_path is not None:
+            return routed_path
+
+    return _first_existing_template(base_dir, list(profile.get("template_candidates") or []))

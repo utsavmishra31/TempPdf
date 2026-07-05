@@ -919,6 +919,28 @@ def to_placeholder_data(doc_type: str, fields: dict[str, str]) -> dict[str, str]
     return data
 
 
+def _infer_pcc_template_route(fields: dict[str, str], normalized_text: str, source_file_name: str) -> str:
+    route_text = _page_marker_text(normalized_text or "", 1) or normalized_text or ""
+    compact = re.sub(r"\s+", " ", route_text).lower()
+
+    if re.search(r"regional\s+passport\s+office\s*[,\-]?\s*jalandhar\b", compact):
+        return "jalandhar"
+    if re.search(r"regional\s+passport\s+office\s*[,\-]?\s*chandigarh\b", compact):
+        return "chandigarh"
+    return ""
+
+
+def _resolve_template_path_for_current_context(doc_type: str, cfg: dict[str, Any]) -> tuple[Path | None, str]:
+    template_route = ""
+    if doc_type == "pcc":
+        template_route = _infer_pcc_template_route(
+            st.session_state.get("fields", {}),
+            st.session_state.get("normalized_text", ""),
+            st.session_state.get("source_file_name", ""),
+        )
+    return resolve_template_path(BASE_DIR, cfg, doc_type, template_route or None), template_route
+
+
 def preflight_template_check(doc_type: str) -> tuple[bool, dict[str, object]]:
     cfg = st.session_state.template_config or refresh_template_config()
     active_doc_types = set(get_active_doc_types(cfg))
@@ -932,13 +954,14 @@ def preflight_template_check(doc_type: str) -> tuple[bool, dict[str, object]]:
             "missing_placeholders": [],
             "unused_placeholders": [],
             "blocked_generation": True,
+            "template_route": "",
             "error": (
                 "Unsupported/inactive document type. "
                 f"Active types: {', '.join(sorted(active_doc_types))}"
             ),
         }
 
-    template_path = resolve_template_path(BASE_DIR, cfg, doc_type)
+    template_path, template_route = _resolve_template_path_for_current_context(doc_type, cfg)
     expected = set(get_field_mapping(cfg, doc_type).values())
     if template_path is None:
         return False, {
@@ -949,11 +972,13 @@ def preflight_template_check(doc_type: str) -> tuple[bool, dict[str, object]]:
             "missing_placeholders": sorted(expected),
             "unused_placeholders": [],
             "blocked_generation": True,
+            "template_route": template_route,
             "error": "No matching template file found in template_candidates.",
         }
 
     audit = audit_template_placeholders(str(template_path), expected)
     audit["template_path"] = str(template_path)
+    audit["template_route"] = template_route
 
     is_ok = bool(audit.get("exists")) and bool(audit.get("readable"))
     # Missing mapped placeholders indicates template and mapping mismatch.
