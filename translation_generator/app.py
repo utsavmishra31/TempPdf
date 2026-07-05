@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from classifiers.detect_document_type import detect_document_type
 from extractors import ExtractorResult, get_extractor
 from services.filename_builder import build_output_basename
-from services.ocr_reader import extract_text_with_ocr
+from services.ocr_reader import extract_text_from_image, extract_text_with_ocr
 from services.output_validator import find_unfilled_placeholders
 from services.pdf_exporter import convert_docx_to_pdf, is_libreoffice_available
 from services.pdf_reader import extract_text_from_pdf
@@ -41,6 +41,8 @@ OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 OCR_MIN_NONSPACE_CHARS = 120
+IMAGE_UPLOAD_TYPES = {"png", "jpg", "jpeg", "tif", "tiff", "webp"}
+SUPPORTED_UPLOAD_TYPES = ["pdf", "png", "jpg", "jpeg", "tif", "tiff", "webp"]
 
 SPANISH_MONTHS = {
     1: "enero",
@@ -56,6 +58,231 @@ SPANISH_MONTHS = {
     11: "noviembre",
     12: "diciembre",
 }
+
+
+def _upload_source_kind(file_name: str, mime_type: str | None) -> str:
+    suffix = Path(file_name).suffix.lower().lstrip(".")
+    mime = (mime_type or "").lower()
+    if suffix == "pdf" or mime == "application/pdf":
+        return "pdf"
+    if suffix in IMAGE_UPLOAD_TYPES or mime.startswith("image/"):
+        return "image"
+    return "unknown"
+
+
+def _extract_ocr_text(file_bytes: bytes | list[bytes], source_file_kind: str) -> str:
+    if source_file_kind == "image":
+        if isinstance(file_bytes, list):
+            page_texts: list[str] = []
+            for page_index, image_bytes in enumerate(file_bytes, start=1):
+                page_texts.append(f"\n=== PAGE {page_index} ===\n{extract_text_from_image(image_bytes)}")
+            return "\n".join(page_texts)
+        return extract_text_from_image(file_bytes)
+    if isinstance(file_bytes, list):
+        raise RuntimeError("PDF processing requires one PDF file.")
+    return extract_text_with_ocr(file_bytes)
+
+
+def _page_marker_text(text: str, page_number: int) -> str:
+    marker_pattern = rf"^\s*===\s*PAGE\s+{page_number}\s*===\s*(.*?)(?=^\s*===\s*PAGE\s+\d+\s*===|\Z)"
+    match = re.search(marker_pattern, text or "", flags=re.I | re.M | re.S)
+    return match.group(1) if match else ""
+
+
+def _clean_image_apostille_value(value: str) -> str:
+    return re.sub(r"\s{2,}", " ", (value or "").replace("\n", " ")).strip(" ,.:;")
+
+
+def _image_apostille_snippet(text: str, start: int, end: int, radius: int = 80) -> str:
+    return _clean_image_apostille_value(text[max(0, start - radius): min(len(text), end + radius)])
+
+
+def _last_image_apostille_match(text: str, patterns: list[str]) -> tuple[str, str, str]:
+    for pattern in patterns:
+        matches = list(re.finditer(pattern, text, flags=re.I | re.M))
+        for match in reversed(matches):
+            value = _clean_image_apostille_value(match.group(1))
+            if value:
+                return value, pattern, _image_apostille_snippet(text, match.start(), match.end())
+    return "", "", ""
+
+
+def _normalize_image_reference_no(value: str) -> str:
+    text = _clean_image_apostille_value(value).upper()
+    compact = re.sub(r"[^A-Z0-9]+", "", text)
+    known_matches = re.findall(r"(?:CHCH|HCH|HRKT0?|HRKTO?)[A-Z0-9O]{6,16}", compact)
+    if known_matches:
+        text = known_matches[-1]
+    else:
+        generic_matches = [
+            match
+            for match in re.findall(r"[A-Z]{2,}[A-Z0-9]{6,20}", compact)
+            if not match.startswith(("APOSTILLE", "NEWDELHI", "GOVERNMENT", "MINISTRY"))
+        ]
+        text = generic_matches[-1] if generic_matches else compact
+    if text.startswith("HRKTO"):
+        text = "HRKT0" + text[5:]
+    if text.startswith("HCH") and not text.startswith("CHCH"):
+        text = "C" + text
+    return re.sub(r"([A-Z]{3,})O([0-9O])", lambda match: match.group(1) + "0" + match.group(2), text)
+
+
+def _normalize_image_apostille_date(value: str) -> str:
+    text = _clean_image_apostille_value(value)
+    match = re.search(r"([0-9]{1,2})[.\-'\s/]+([A-Za-z]{3,9})[.\-'\s/]+(20[0-9]{2})", text)
+    if match:
+        day, month, year = match.groups()
+        return f"{int(day):02d}-{month[:3].title()}-{year}"
+    return text
+
+
+def _normalize_image_stamp_no(value: str) -> str:
+    text = _clean_image_apostille_value(value).upper()
+    stamp_match = re.search(r"(?:[O0][I1L]|OI|OL|01)\s*([0-9OIL]{7,9})", text, flags=re.I)
+    digits = stamp_match.group(1) if stamp_match else re.sub(r"\D+", "", text)
+    digits = digits.replace("O", "0").replace("I", "1").replace("L", "1")
+    return digits if digits.isdigit() and 7 <= len(digits) <= 9 else ""
+
+
+def _resize_image_for_fast_ocr(image: Any, max_side: int = 2200, min_side: int = 1300) -> Any:
+    width, height = image.size
+    longest = max(width, height)
+    shortest = min(width, height)
+    scale = 1.0
+    if longest > max_side:
+        scale = max_side / longest
+    elif shortest < min_side:
+        scale = min(2.0, min_side / max(1, shortest))
+    if scale == 1.0:
+        return image
+    from PIL import Image
+
+    return image.resize((int(width * scale), int(height * scale)), Image.Resampling.LANCZOS)
+
+
+def _ocr_fast_image_view(image: Any, config: str) -> str:
+    import pytesseract
+    from pytesseract.pytesseract import TesseractNotFoundError
+
+    try:
+        return pytesseract.image_to_string(image, config=config, timeout=8)
+    except TesseractNotFoundError:
+        raise
+    except RuntimeError:
+        return ""
+
+
+def _iter_targeted_image_apostille_ocr(image_bytes: bytes, missing_fields: set[str]):
+    try:
+        from PIL import Image, ImageFilter, ImageOps
+        from pytesseract.pytesseract import TesseractNotFoundError
+    except ImportError:
+        return
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return
+
+    gray = ImageOps.grayscale(_resize_image_for_fast_ocr(image))
+    enhanced = ImageOps.autocontrast(gray, cutoff=1).filter(ImageFilter.SHARPEN)
+    width, height = enhanced.size
+
+    views: list[tuple[Any, str]] = []
+    if {"reference_no", "apostille_date"} & missing_fields:
+        views.append((enhanced, "--oem 3 --psm 6"))
+    if {"apostille_date", "stamp_no"} & missing_fields:
+        lower = enhanced.crop((0, int(height * 0.35), width, height))
+        views.append((lower, "--oem 3 --psm 6"))
+    if "stamp_no" in missing_fields:
+        stamp_area = enhanced.crop((int(width * 0.32), int(height * 0.42), width, height))
+        threshold = stamp_area.point(lambda pixel: 255 if pixel > 165 else 0)
+        views.append((threshold, "--oem 3 --psm 6"))
+    if {"reference_no", "apostille_date"} & missing_fields:
+        views.append((enhanced, "--oem 3 --psm 11"))
+
+    for view, config in views[:4]:
+        try:
+            text = _ocr_fast_image_view(view, config)
+        except TesseractNotFoundError:
+            return
+        if text.strip():
+            yield text
+
+
+def _apply_image_page2_apostille_fallback(
+    fields: dict[str, str],
+    extraction_debug: dict[str, dict[str, str | float]],
+    text: str,
+    warnings: list[str],
+    page2_image_bytes: bytes | None = None,
+) -> None:
+    page_text = _page_marker_text(text, 2)
+    if not page_text.strip():
+        return
+
+    fallback_specs = {
+        "reference_no": (
+            [
+                r"(?:apostille\s*)?(?:(?:reference|referencia)\s*(?:no|number|n\.?[ºo°]?)|n\.?\s*[ºo°]?\s*de\s*referencia)\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-/ ]{5,36})",
+                r"\bNo\.?\s*[:\-]?\s*([A-Z]{2,}[A-Z0-9\-/]{6,})\b",
+                r"\b((?:CHCH|HCH|HRKT|HRKTO)[A-Z0-9O\-/]{6,})\b",
+            ],
+            _normalize_image_reference_no,
+            "reference number",
+        ),
+        "apostille_date": (
+            [
+                r"(?:NEW\s+DELHI|DELHI)[^\n]{0,80}?([0-9]{1,2}[.\-'\s/]+[A-Za-z]{3,9}[.\-'\s/]+20[0-9]{2})",
+                r"\b([0-9]{1,2}[.\-'\s/]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.\-'\s/]+20[0-9]{2})\b",
+                r"\bel\s+([0-9]{1,2}\s+de\s+[A-Za-záéíóú]+\s+de\s+20[0-9]{2})",
+                r"\bat\s+[A-Za-z\s,]+[.:]\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/]20[0-9]{2})",
+            ],
+            _normalize_image_apostille_date,
+            "apostille date",
+        ),
+        "stamp_no": (
+            [
+                r"\b((?:[O0][I1L]|OI|OL|01)\s*[0-9OIL]{7,9})\b",
+                r"(?:stamp|seal)\s*(?:no|number)\s*[:\-]?\s*([A-Z0-9I][A-Z0-9I\s./\-]{4,})",
+            ],
+            _normalize_image_stamp_no,
+            "stamp number",
+        ),
+    }
+
+    def fill_from_text(source_text: str, method: str, confidence: float) -> None:
+        for field_key, (patterns, normalizer, label) in fallback_specs.items():
+            if (fields.get(field_key) or "").strip():
+                continue
+            raw_value, pattern, snippet = _last_image_apostille_match(source_text, patterns)
+            value = normalizer(raw_value)
+            if not value:
+                continue
+            fields[field_key] = value
+            extraction_debug[field_key] = {
+                "value": value,
+                "confidence": confidence,
+                "method": method,
+                "pattern": pattern,
+                "source_snippet": snippet,
+            }
+            warnings.append(f"Image page 2 apostille {label} extracted via OCR: {value}")
+
+    fill_from_text(page_text, "image_page2_apostille_text", 0.82)
+
+    missing_fields = {key for key in fallback_specs if not (fields.get(key) or "").strip()}
+    if not missing_fields or page2_image_bytes is None:
+        return
+
+    targeted_text = page_text
+    for ocr_text in _iter_targeted_image_apostille_ocr(page2_image_bytes, missing_fields):
+        targeted_text = f"{targeted_text}\n{ocr_text}"
+        fill_from_text(targeted_text, "image_page2_apostille_targeted_ocr", 0.9)
+        missing_fields = {key for key in fallback_specs if not (fields.get(key) or "").strip()}
+        if not missing_fields:
+            break
 
 
 def _format_date_es(dt: date) -> str:
@@ -380,6 +607,7 @@ def init_session_state() -> None:
         "has_processed_pdf": False,
         "last_process_error": "",
         "pdf_bytes": b"",
+        "source_file_kind": "pdf",
         "raw_text": "",
         "normalized_text": "",
         "direct_text_chars": 0,
@@ -412,15 +640,20 @@ def refresh_template_config() -> dict[str, Any]:
     return cfg
 
 
-def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
+def run_pipeline(pdf_bytes: bytes | list[bytes], forced_doc_type: str | None = None, source_file_kind: str = "pdf") -> None:
+    source_file_kind = source_file_kind if source_file_kind in {"pdf", "image"} else "pdf"
     cfg = st.session_state.template_config or refresh_template_config()
     active_doc_types = set(get_active_doc_types(cfg))
     warnings: list[str] = []
 
-    direct_text, extraction_source = extract_text_from_pdf(pdf_bytes)
+    if source_file_kind == "pdf":
+        if isinstance(pdf_bytes, list):
+            raise RuntimeError("PDF processing requires one PDF file.")
+        direct_text, extraction_source = extract_text_from_pdf(pdf_bytes)
+    else:
+        direct_text, extraction_source = "", "image"
     direct_normalized = normalize_text(direct_text)
     direct_nonspace_chars = len("".join(direct_normalized.split()))
-
     raw_text = direct_text
     normalized = direct_normalized
     effective_source = extraction_source
@@ -431,7 +664,7 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
     # Always force OCR for weak/no direct text, and for unknown classification on weak text.
     weak_direct_text = direct_nonspace_chars < OCR_MIN_NONSPACE_CHARS
     preliminary_classification = detect_document_type(direct_normalized)
-    should_try_ocr = weak_direct_text or (
+    should_try_ocr = source_file_kind == "image" or weak_direct_text or (
         preliminary_classification.doc_type == "unknown" and direct_nonspace_chars < (OCR_MIN_NONSPACE_CHARS * 2)
     ) or (
         forced_doc_type is not None
@@ -444,7 +677,7 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
         ocr_auto_triggered = True
         logger.info("Direct extraction is short; trying OCR fallback")
         try:
-            ocr_text = extract_text_with_ocr(pdf_bytes)
+            ocr_text = _extract_ocr_text(pdf_bytes, source_file_kind)
             ocr_normalized = normalize_text(ocr_text)
             ocr_text_chars = len(ocr_normalized)
             # Use OCR when it produces stronger text, or direct text is effectively empty.
@@ -486,7 +719,7 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
         if (extraction_sparse or pcc_apostille_sparse) and not used_ocr:
             logger.info("Extraction is sparse; forcing OCR reprocessing")
             try:
-                ocr_text = extract_text_with_ocr(pdf_bytes)
+                ocr_text = _extract_ocr_text(pdf_bytes, source_file_kind)
                 ocr_normalized = normalize_text(ocr_text)
                 ocr_text_chars = len(ocr_normalized)
                 if len("".join(ocr_normalized.split())) >= direct_nonspace_chars:
@@ -526,7 +759,7 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
     # When normal text extraction cannot read the embossed apostille sticker,
     # render page 2 as an image and apply noise-removal preprocessing to
     # extract stamp_no and apostille_date automatically.
-    if effective_doc_type == "pcc" and fields:
+    if effective_doc_type == "pcc" and fields and source_file_kind == "pdf":
         _stamp_missing = not (fields.get("stamp_no") or "").strip()
         _date_missing  = not (fields.get("apostille_date") or "").strip()
         if (_stamp_missing or _date_missing) and pdf_bytes:
@@ -560,7 +793,7 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
             except Exception as _exc:  # noqa: BLE001
                 logger.debug("Apostille crop OCR skipped: %s", _exc)
 
-    if effective_doc_type == "birth" and fields:
+    if effective_doc_type == "birth" and fields and source_file_kind == "pdf":
         _stamp_missing = not (fields.get("stamp_no") or "").strip()
         if _stamp_missing and pdf_bytes:
             try:
@@ -580,7 +813,7 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
             except Exception as _exc:  # noqa: BLE001
                 logger.debug("Birth apostille crop OCR skipped: %s", _exc)
 
-    if effective_doc_type == "medical" and fields:
+    if effective_doc_type == "medical" and fields and source_file_kind == "pdf":
         try:
             sticker_name = _extract_medical_sticker_name_from_pdf(pdf_bytes) if pdf_bytes else ""
             if sticker_name:
@@ -610,12 +843,17 @@ def run_pipeline(pdf_bytes: bytes, forced_doc_type: str | None = None) -> None:
         except Exception as _exc:  # noqa: BLE001
             logger.debug("Medical apostille crop OCR skipped: %s", _exc)
 
+    if source_file_kind == "image" and fields:
+        page2_image_bytes = pdf_bytes[1] if isinstance(pdf_bytes, list) and len(pdf_bytes) > 1 else None
+        _apply_image_page2_apostille_fallback(fields, extraction_debug, normalized, warnings, page2_image_bytes)
+
     st.session_state.raw_text = raw_text
     st.session_state.normalized_text = normalized
     st.session_state.direct_text_chars = len(direct_normalized)
     st.session_state.ocr_text_chars = ocr_text_chars
     st.session_state.ocr_auto_triggered = ocr_auto_triggered
     st.session_state.extraction_source = effective_source
+    st.session_state.source_file_kind = source_file_kind
     st.session_state.has_processed_pdf = True
     st.session_state.last_process_error = ""
     st.session_state.used_ocr = used_ocr or effective_source == "ocr"
@@ -778,6 +1016,8 @@ def _render_apostille_sticker_viewer() -> None:
     enhanced image of the apostille sticker area so the user can read the
     values and enter them manually."""
     if st.session_state.effective_doc_type != "pcc":
+        return
+    if st.session_state.source_file_kind != "pdf":
         return
     fields = st.session_state.fields or {}
     stamp_no = (fields.get("stamp_no") or "").strip()
@@ -946,31 +1186,67 @@ def main() -> None:
     st.caption(f"Current active profiles: {', '.join(active_doc_types) if active_doc_types else 'none'}")
 
     st.subheader("1) Upload")
-    uploaded_file = st.file_uploader("Upload English PDF", type=["pdf"])
+    upload_option = st.radio("Upload option", options=["PDF", "Images"], horizontal=True)
+    uploaded_file = None
+    first_page_image = None
+    second_page_image = None
+    additional_page_images: list[Any] = []
+    if upload_option == "PDF":
+        uploaded_file = st.file_uploader("Upload English PDF", type=["pdf"], key="pdf_upload")
+    else:
+        first_page_image = st.file_uploader("Upload 1st page image", type=SUPPORTED_UPLOAD_TYPES[1:], key="image_page_1")
+        second_page_image = st.file_uploader("Upload 2nd page image", type=SUPPORTED_UPLOAD_TYPES[1:], key="image_page_2")
+        additional_page_images = st.file_uploader(
+            "Upload additional page images",
+            type=SUPPORTED_UPLOAD_TYPES[1:],
+            accept_multiple_files=True,
+            key="image_additional_pages",
+        )
 
-    process_clicked = st.button("Process PDF", type="primary")
+    process_clicked = st.button("Process File", type="primary")
     if process_clicked:
-        if uploaded_file is None:
-            st.warning("Please upload a PDF first.")
+        source_file_kind = "pdf" if upload_option == "PDF" else "image"
+        if upload_option == "PDF":
+            if uploaded_file is None:
+                st.warning("Please upload a PDF first.")
+                return
+            source_payload: bytes | list[bytes] = uploaded_file.getvalue()
+            source_file_name = uploaded_file.name
         else:
-            st.session_state.source_file_name = uploaded_file.name
-            st.session_state.pdf_bytes = uploaded_file.getvalue()
-            st.session_state.last_process_error = ""
-            st.session_state.has_processed_pdf = False
-            try:
-                with st.spinner("Processing PDF..."):
-                    run_pipeline(st.session_state.pdf_bytes)
-                st.success("PDF processed. Review detection and extracted fields below.")
-                if not st.session_state.normalized_text:
-                    st.warning(
-                        "No readable text was extracted from this PDF. "
-                        "Try a clearer scan or check OCR/Tesseract setup."
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Process PDF failed")
-                st.session_state.last_process_error = str(exc)
-                st.session_state.has_processed_pdf = True
-                st.error(f"Process PDF failed: {exc}")
+            if first_page_image is None or second_page_image is None:
+                st.warning("Please upload at least two images: page 1 and page 2.")
+                return
+            uploaded_images = [first_page_image, second_page_image, *additional_page_images]
+            invalid_images = [
+                image.name
+                for image in uploaded_images
+                if _upload_source_kind(image.name, getattr(image, "type", "")) != "image"
+            ]
+            if invalid_images:
+                st.warning("Please upload only supported image files: " + ", ".join(invalid_images))
+                return
+            source_payload = [image.getvalue() for image in uploaded_images]
+            source_file_name = uploaded_images[0].name
+
+        st.session_state.source_file_name = source_file_name
+        st.session_state.source_file_kind = source_file_kind
+        st.session_state.pdf_bytes = source_payload
+        st.session_state.last_process_error = ""
+        st.session_state.has_processed_pdf = False
+        try:
+            with st.spinner("Processing file..."):
+                run_pipeline(st.session_state.pdf_bytes, source_file_kind=source_file_kind)
+            st.success("File processed. Review detection and extracted fields below.")
+            if not st.session_state.normalized_text:
+                st.warning(
+                    "No readable text was extracted from this file. "
+                    "Try a clearer scan or check OCR/Tesseract setup."
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Process file failed")
+            st.session_state.last_process_error = str(exc)
+            st.session_state.has_processed_pdf = True
+            st.error(f"Process file failed: {exc}")
 
     if st.session_state.has_processed_pdf:
         st.subheader("2) Detection Results")
@@ -998,18 +1274,19 @@ def main() -> None:
         if selected_type != "auto":
             if st.button("Apply document type override"):
                 if not st.session_state.pdf_bytes:
-                    st.warning("Please process a PDF before applying override.")
+                    st.warning("Please process a file before applying override.")
                 else:
                     run_pipeline(
                         st.session_state.pdf_bytes,
                         forced_doc_type=selected_type,
+                        source_file_kind=st.session_state.source_file_kind,
                     )
 
         with st.expander("Raw extracted text preview"):
             if st.session_state.raw_text:
                 st.text_area("Extracted text", st.session_state.raw_text, height=300)
             else:
-                st.info("No raw text extracted from the uploaded PDF.")
+                st.info("No raw text extracted from the uploaded file.")
 
         st.subheader("3) Editable extracted fields")
         render_editable_fields()

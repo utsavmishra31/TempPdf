@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import shutil
+from io import BytesIO
 from pathlib import Path
 
 import pytesseract
 from pdf2image import convert_from_bytes
 from pdf2image.exceptions import PDFInfoNotInstalledError
-from PIL import ImageFilter
+from PIL import Image, ImageFilter, ImageSequence
 from pytesseract.pytesseract import TesseractNotFoundError
 
 
@@ -37,26 +38,18 @@ def _resolve_poppler_path() -> str | None:
     return None
 
 
-def extract_text_with_ocr(pdf_bytes: bytes) -> str:
-    """Run OCR on all PDF pages and return merged text."""
+def _configure_tesseract() -> None:
     tesseract_cmd = os.getenv("TESSERACT_CMD", "").strip()
-    poppler_path = _resolve_poppler_path()
-
     if tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-    try:
-        images = convert_from_bytes(pdf_bytes, dpi=400, poppler_path=poppler_path)
-    except PDFInfoNotInstalledError as exc:
-        raise RuntimeError(
-            "Poppler is required for OCR but was not found. Install it with 'brew install poppler'. "
-            "If already installed, set POPPLER_PATH to the directory containing pdfinfo "
-            "(for example /opt/homebrew/bin or /usr/local/bin)."
-        ) from exc
 
+def _extract_text_from_images(images: list[Image.Image]) -> str:
     text_parts: list[str] = []
     try:
         for image in images:
+            if image.mode not in {"RGB", "L"}:
+                image = image.convert("RGB")
             # Run two passes: auto-layout raw and sharpened uniform-block.
             # For decorative apostille pages the raw pass captures reference codes
             # that sharpening loses; for regular text pages sharpening wins.
@@ -80,3 +73,33 @@ def extract_text_with_ocr(pdf_bytes: bytes) -> str:
             "(for example /opt/homebrew/bin/tesseract)."
         ) from exc
     return "\n".join(text_parts)
+
+
+def extract_text_with_ocr(pdf_bytes: bytes) -> str:
+    """Run OCR on all PDF pages and return merged text."""
+    _configure_tesseract()
+    poppler_path = _resolve_poppler_path()
+
+    try:
+        images = convert_from_bytes(pdf_bytes, dpi=400, poppler_path=poppler_path)
+    except PDFInfoNotInstalledError as exc:
+        raise RuntimeError(
+            "Poppler is required for OCR but was not found. Install it with 'brew install poppler'. "
+            "If already installed, set POPPLER_PATH to the directory containing pdfinfo "
+            "(for example /opt/homebrew/bin or /usr/local/bin)."
+        ) from exc
+
+    return _extract_text_from_images(images)
+
+
+def extract_text_from_image(image_bytes: bytes) -> str:
+    """Run OCR on an uploaded image and return extracted text."""
+    _configure_tesseract()
+
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            images = [frame.copy() for frame in ImageSequence.Iterator(source)]
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("Uploaded image could not be opened for OCR.") from exc
+
+    return _extract_text_from_images(images)
