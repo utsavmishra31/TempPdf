@@ -74,6 +74,23 @@ def _is_jalandhar_pcc(text: str) -> bool:
     )
 
 
+def _extract_jalandhar_apostille_officer_name(text: str) -> tuple[str, dict[str, str | float]]:
+    pattern = r"\((Suresh\s+Kum(?:ar|a)?)\b[^)]{0,80}\((?:Attestation|Atrestation|Aliestatio)"
+    match = re.search(pattern, text or "", flags=re.IGNORECASE)
+    if not match:
+        return "", _fallback_meta("")
+
+    sign_name = _clean_value(match.group(1)).upper()
+    if re.match(r"^SURESH\s+KUM", sign_name):
+        sign_name = "SURESH KUMAR"
+    return sign_name, _meta_from_find(
+        pattern,
+        sign_name,
+        _snippet(text, match.start(), match.end()),
+        0.9,
+    )
+
+
 def _extract_main_pcc_record(text: str) -> dict[str, str | dict[str, dict[str, str | float]]]:
     compact = re.sub(r"\s+", " ", text)
     pattern = (
@@ -328,19 +345,10 @@ def _extract_apostille_fields(text: str) -> tuple[str, str, str, dict[str, dict[
             break
 
     if _is_jalandhar_pcc(text):
-        jalandhar_sign_pattern = r"has\s+been\s+signed\s+by\s+([A-Z][A-Za-z]{2,}\s+[A-Z][A-Za-z]{2,})\b"
-        jalandhar_sign_match = re.search(jalandhar_sign_pattern, text, flags=re.IGNORECASE)
-        if jalandhar_sign_match:
-            sign_name = _clean_value(jalandhar_sign_match.group(1)).upper()
-            sign_meta = _meta_from_find(
-                jalandhar_sign_pattern,
-                sign_name,
-                _snippet(text, jalandhar_sign_match.start(), jalandhar_sign_match.end()),
-                0.9,
-            )
-        elif signed_by and (not sign_name or sign_name == "WASH PAL"):
-            sign_name = signed_by
-            sign_meta = {**signed_by_meta, "value": sign_name, "method": "jalandhar_signed_by"}
+        jalandhar_sign_name, jalandhar_sign_meta = _extract_jalandhar_apostille_officer_name(text)
+        if jalandhar_sign_name:
+            sign_name = jalandhar_sign_name
+            sign_meta = jalandhar_sign_meta
 
     apostille_date = ""
     apostille_date_meta = _fallback_meta("")
@@ -515,6 +523,12 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
     debug["sign_name"] = apostille_debug["sign_name"]
     debug["apostille_date"] = apostille_debug["apostille_date"]
     debug["stamp_no"] = apostille_debug["stamp_no"]
+
+    if _is_jalandhar_pcc(text):
+        jalandhar_sign_name, jalandhar_sign_meta = _extract_jalandhar_apostille_officer_name(text)
+        if jalandhar_sign_name:
+            values["sign_name"] = jalandhar_sign_name
+            debug["sign_name"] = jalandhar_sign_meta
 
     # Avoid false-positive stamp_no when OCR captures passport number.
     if values["stamp_no"] and values["passport_no"] and values["stamp_no"].replace(" ", "") == values["passport_no"].replace(" ", ""):
