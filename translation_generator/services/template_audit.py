@@ -6,7 +6,8 @@ import re
 from pathlib import Path
 from xml.sax.saxutils import unescape
 
-PLACEHOLDER_PATTERN = re.compile(r"<<[A-Z0-9_]+>>?|&lt;&lt;[A-Z0-9_]+&gt;&gt;?|<<[A-Z0-9_]+&gt;&gt;?")
+PLACEHOLDER_PATTERN = re.compile(r"<<[A-Z0-9_-]+>>?|&lt;&lt;[A-Z0-9_-]+&gt;&gt;?|<<[A-Z0-9_-]+&gt;&gt;?")
+TEXT_NODE_PATTERN = re.compile(r"<w:t\b[^>]*>(.*?)</w:t>", re.DOTALL)
 
 
 def _normalize_placeholder(token: str) -> str:
@@ -29,6 +30,7 @@ def extract_template_placeholders(template_path: str) -> Counter[str]:
 
         for name in xml_files:
             content = archive.read(name).decode("utf-8", errors="ignore")
+            content = "".join(unescape(match.group(1)) for match in TEXT_NODE_PATTERN.finditer(content))
             tokens = PLACEHOLDER_PATTERN.findall(content)
             normalized = [_normalize_placeholder(token) for token in tokens]
             counts.update(normalized)

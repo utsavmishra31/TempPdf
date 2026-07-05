@@ -312,6 +312,147 @@ def _normalize_stamp_no_for_template(value: str) -> str:
     return digits or text
 
 
+def _parse_marriage_text_date(value: str) -> date | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    normalized = re.sub(r"\bNoy\b", "Nov", text, flags=re.IGNORECASE)
+    normalized = re.sub(r"^0S\b", "05", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"^OS\b", "05", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s+", " ", normalized)
+
+    numeric_dt = _parse_flexible_date(normalized)
+    if numeric_dt:
+        return numeric_dt
+
+    match = re.search(r"([0-9]{1,2})\s*[-/ ]?\s*([A-Za-z]{3,9})\s*[-/ ]?\s*((?:19|20)[0-9]{2})", normalized)
+    if not match:
+        return None
+
+    month_lookup = {
+        "jan": 1,
+        "january": 1,
+        "feb": 2,
+        "february": 2,
+        "mar": 3,
+        "march": 3,
+        "apr": 4,
+        "april": 4,
+        "may": 5,
+        "jun": 6,
+        "june": 6,
+        "jul": 7,
+        "july": 7,
+        "aug": 8,
+        "august": 8,
+        "sep": 9,
+        "sept": 9,
+        "september": 9,
+        "oct": 10,
+        "october": 10,
+        "nov": 11,
+        "november": 11,
+        "dec": 12,
+        "december": 12,
+    }
+    month = month_lookup.get(match.group(2).lower())
+    if not month:
+        return None
+    try:
+        return date(int(match.group(3)), month, int(match.group(1)))
+    except ValueError:
+        return None
+
+
+def _format_marriage_date_es(value: str) -> str:
+    parsed = _parse_marriage_text_date(value)
+    return _format_date_es(parsed) if parsed else (value or "")
+
+
+def _format_marriage_age_es(value: str) -> str:
+    match = re.search(r"(?:About\s+)?([0-9]+)\s+Years?\s+([0-9]+)\s+months?", value or "", flags=re.IGNORECASE)
+    if not match:
+        return value or ""
+    years = int(match.group(1))
+    months = int(match.group(2))
+    year_word = "año" if years == 1 else "años"
+    month_word = "mes" if months == 1 else "meses"
+    return f"{years} {year_word} y {months} {month_word}"
+
+
+def _format_marriage_status_es(value: str, gender: str) -> str:
+    status = (value or "").strip().lower()
+    masculine = gender == "m"
+    if status == "unmarried":
+        return "SOLTERO" if masculine else "SOLTERA"
+    if status == "divorced":
+        return "DIVORCIADO" if masculine else "DIVORCIADA"
+    if status == "married":
+        return "CASADO" if masculine else "CASADA"
+    if status == "widowed":
+        return "VIUDO" if masculine else "VIUDA"
+    return (value or "").upper()
+
+
+def _format_marriage_person_title(value: str) -> str:
+    return " ".join(part[:1].upper() + part[1:].lower() for part in re.findall(r"[A-Za-z]+", value or ""))
+
+
+def _format_marriage_designation(value: str) -> str:
+    if re.search(r"marriage\s+registrar", value or "", flags=re.IGNORECASE):
+        return "Registrador de Matrimonios"
+    return value or ""
+
+
+def _format_marriage_place(value: str) -> str:
+    text = (value or "").upper()
+    text = re.sub(r"\bSHRI\b", "SRI", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _format_marriage_placeholder_data(data: dict[str, str], mapping: dict[str, str], fields: dict[str, str]) -> None:
+    def set_mapped(field_key: str, value: str) -> None:
+        placeholder = mapping.get(field_key)
+        if placeholder:
+            data[placeholder] = value or ""
+
+    for field_key in (
+        "name",
+        "district",
+        "novio_name",
+        "novia_name",
+        "novio_father",
+        "novia_father",
+        "novio_mother",
+        "novia_mother",
+        "novio_place_of_residence",
+        "novia_place_of_residence",
+        "novio_foreign_address",
+        "novia_foreign_address",
+    ):
+        set_mapped(field_key, (fields.get(field_key) or "").upper())
+
+    set_mapped("marriage_place", _format_marriage_place(fields.get("marriage_place", "")))
+    set_mapped("application_date", _format_marriage_date_es(fields.get("application_date", "")))
+    set_mapped("marriage_date", _format_marriage_date_es(fields.get("marriage_date", "")))
+    set_mapped("register_date", _format_marriage_date_es(fields.get("register_date", "")))
+    set_mapped("approv_date", _format_marriage_date_es(fields.get("approv_date", "")))
+    set_mapped("apostille_date", _format_marriage_date_es(fields.get("apostille_date", "")))
+    set_mapped("novio_birth_date", _format_marriage_date_es(fields.get("novio_birth_date", "")))
+    set_mapped("novia_birth_date", _format_marriage_date_es(fields.get("novia_birth_date", "")))
+    set_mapped("novio_marriage_age", _format_marriage_age_es(fields.get("novio_marriage_age", "")))
+    set_mapped("novia_marriage_age", _format_marriage_age_es(fields.get("novia_marriage_age", "")))
+    set_mapped("novio_marriage_status", _format_marriage_status_es(fields.get("novio_marriage_status", ""), "m"))
+    set_mapped("novia_marriage_status", _format_marriage_status_es(fields.get("novia_marriage_status", ""), "f"))
+    set_mapped("uid", "" if (fields.get("uid") or "").strip().lower() == "not provided" else fields.get("uid", ""))
+    set_mapped("sign_name", _format_marriage_person_title(fields.get("sign_name", "")))
+    set_mapped("designation", _format_marriage_designation(fields.get("designation", "")))
+    set_mapped("location", fields.get("location", ""))
+    set_mapped("apostille_sign", _format_marriage_person_title(fields.get("apostille_sign", "")))
+    set_mapped("signed_by", (fields.get("signed_by") or "").upper())
+
+
 def _find_birth_stamp_digits(text: str) -> str:
     patterns = [
         r"^(?:[O0][I1]|O1|01)([0-9OI]{7})$",
@@ -898,7 +1039,7 @@ def to_placeholder_data(doc_type: str, fields: dict[str, str]) -> dict[str, str]
             fields.get("stamp_no", "")
         )
 
-    if doc_type in {"birth", "medical"}:
+    if doc_type in {"birth", "marriage", "medical"}:
         data[mapping.get("stamp_no", "<<0I_NO>>")] = _normalize_stamp_no_for_template(
             fields.get("stamp_no", "")
         )
@@ -910,7 +1051,10 @@ def to_placeholder_data(doc_type: str, fields: dict[str, str]) -> dict[str, str]
     elif apostille_raw:
         data[mapping.get("apostille_date", "<<APOSTILLE_DATE>>")] = apostille_raw
 
-    if doc_type in {"birth", "medical"}:
+    if doc_type == "marriage":
+        _format_marriage_placeholder_data(data, mapping, fields)
+
+    if doc_type in {"birth", "marriage", "medical"}:
         placeholders = set(mapping.values()) | {"<<T_DATE>>", "<<TODAY_DATE>>", "<<TITLE>>"}
         _add_placeholder_case_aliases(data, placeholders)
         if doc_type == "birth" and "<<DESIGNATION>>" in data:
