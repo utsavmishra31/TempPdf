@@ -81,6 +81,31 @@
         "apostille_date": "<<APOSTILLE_DATE>>",
         "stamp_no": "<<0I_NO>>"
       }
+    },
+    "medical": {
+      "active": true,
+      "template_candidates": [
+        "templates/medical_template.docx",
+        "templates/MEDICAL.docx"
+      ],
+      "required_fields": [
+        "name",
+        "relation_text",
+        "father_name",
+        "certificate_date"
+      ],
+      "field_to_placeholder": {
+        "name": "<<NAME>>",
+        "relation_text_es": "<<RELATION>>",
+        "father_name": "<<FATHER>>",
+        "passport_no": "<<PASSPORT>>",
+        "certificate_date": "<<DATE>>",
+        "reference_no": "<<REFERENCE_NO>>",
+        "sign_name": "<<SECTION_OFFICER_SIGN>>",
+        "signed_by": "<<SIGNED_BY>>",
+        "apostille_date": "<<APOSTILLE_DATE>>",
+        "stamp_no": "<<0I_NO>>"
+      }
     }
   }
 }
