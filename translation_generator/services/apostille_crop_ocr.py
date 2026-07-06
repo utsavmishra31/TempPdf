@@ -23,18 +23,11 @@ def _find_poppler() -> str | None:
     return None
 
 
-def _render_page2(pdf_bytes: bytes, dpi: int = 350):
-    """Return a PIL Image of page 2 at the given DPI, or None on failure."""
-    try:
-        from pdf2image import convert_from_bytes
-        pages = convert_from_bytes(
-            pdf_bytes, dpi=dpi,
-            first_page=2, last_page=2,
-            poppler_path=_find_poppler(),
-        )
-        return pages[0] if pages else None
-    except Exception:
-        return None
+def _render_page2(pdf_bytes: bytes, dpi: int = 250):
+    """Return a PIL Image of page 2, using the shared page cache."""
+    from services.pdf_page_cache import get_pages
+    pages = get_pages(pdf_bytes, dpi=dpi, first_page=2, last_page=2)
+    return pages[0] if pages else None
 
 
 def _make_variants(crop):

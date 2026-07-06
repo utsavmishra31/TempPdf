@@ -25,12 +25,6 @@ PERSON_STOPWORDS = {
     "OFFICER",
     "MINISTRY",
     "EXTERNAL",
-    "ATLAS",
-    "WLC",
-    "WD",
-    "EH",
-    "OH",
-    "DZ",
 }
 
 
@@ -357,8 +351,8 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
 
     patterns: dict[str, list[str]] = {
         "serial_no": [r"Document\s+Sr\.?\s*No\s*[:;\-]?\s*([A-Z0-9\-/ ]{6,})"],
-        "application_date": [r"Date\s+of\s+Application\s*[:;\-]?\s*(" + DATE_TEXT + r")"],
-        "marriage_date": [r"Date\s+of\s+Solemnization\s+of\s+Marriage\s*[:;\-]?\s*(" + DATE_TEXT + r")"],
+        "application_date": [r"Date\s+of\s+Applicat[io]*n\s*[:\;\-]?\s*(" + DATE_TEXT + r")"],
+        "marriage_date": [r"Date\s+of\s+Solemnization\s+of\s+Marriage\s*[:\;\-.]?\s*(" + DATE_TEXT + r")"],
         "marriage_place": [r"Place\s+of\s+Marriage\s*[:;\-]?\s*(.*?)(?=\s+District\s*[:;\-]|\s+S\.\s*No\.)"],
         "district": [r"District\s*[:;\-]?\s*[^/\n]{0,40}/\s*([A-Z][A-Za-z]+)", r"District\s*[:;\-]?\s*([A-Z][A-Za-z]+)"],
         "register_no": [r"Registered\s+at\s+No\.?\s*([A-Z0-9\-/]+)\s+on\s+" + DATE_TEXT],
@@ -410,9 +404,9 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         values[key] = value
         debug[key] = {**meta, "value": value}
 
-    name_segment = _segment_between(compact, r"\b1\.?\s*Name\b", r"\b2\.?\s*Father'?s\s+Name\b")
-    father_segment = _segment_between(compact, r"\b2\.?\s*Father'?s\s+Name\b", r"\b3\.?\s*Mother'?s\s+Name\b")
-    mother_segment = _segment_between(compact, r"\b3\.?\s*Mother'?s\s+Name\b", r"\b4[.,]?\s*Usual\s+place")
+    name_segment = _segment_between(compact, r"\b1\.?[^A-Za-z\n]{0,12}N[ae]me?\b", r"\b2\.?[^A-Za-z\n]{0,15}Father'?s?\s+Name\b")
+    father_segment = _segment_between(compact, r"\b2\.?[^A-Za-z\n]{0,15}Father'?s?\s+Name\b", r"\b3\.?[^A-Za-z\n]{0,15}Mother'?s?\s+Name\b")
+    mother_segment = _segment_between(compact, r"\b3\.?[^A-Za-z\n]{0,15}Mother'?s?\s+Name\b", r"\b4[.,]?\s*Usual\s+place")
     residence_segment = _segment_between(compact, r"\b4[.,]?\s*Usual\s+place\s+of\s+residence\b", r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b")
     foreign_segment = _segment_between(compact, r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b", r"\b6\.?\s*Date\s+Of\s+Birth")
     residence_segments = _address_segments_between(compact, r"\b4[.,]?\s*Usual\s+place\s+of\s+residence\b", r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b")
@@ -421,6 +415,28 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
     _apply_pair(values, debug, "novio_name", "novia_name", name_segment, "Name row")
     _apply_pair(values, debug, "novio_father", "novia_father", father_segment, "Father row")
     _apply_pair(values, debug, "novio_mother", "novia_mother", mother_segment, "Mother row")
+
+    # Fallback: "Certified that above contents … regarding Bridegroom … and … regarding Bride …"
+    # This sentence reliably contains full names even when the table row patterns fail.
+    if not values.get("novio_name") or not values.get("novia_name"):
+        groom_m = re.search(
+            r"regarding\s+Bride[Gg]room\s+[^A-Za-z\n]{0,40}(?:/\s*)?([A-Z][A-Z\s]{3,40}?)\s+and\s+[Nn]o",
+            compact, flags=re.IGNORECASE,
+        )
+        bride_m = re.search(
+            r"regarding\s+Bride\s+[^A-Za-z\n]{0,40}(?:/\s*)?([A-Z][A-Z\s]{3,40}?)\s+(?:are|is)\s+(?:true|tue)",
+            compact, flags=re.IGNORECASE,
+        )
+        if groom_m and not values.get("novio_name"):
+            name = _clean_person_name(groom_m.group(1))
+            if name:
+                values["novio_name"] = name
+                debug["novio_name"] = _meta(name, "certified_statement", groom_m.group(0)[:80], groom_m.group(0)[:80], 0.88)
+        if bride_m and not values.get("novia_name"):
+            name = _clean_person_name(bride_m.group(1))
+            if name:
+                values["novia_name"] = name
+                debug["novia_name"] = _meta(name, "certified_statement", bride_m.group(0)[:80], bride_m.group(0)[:80], 0.88)
     _apply_address_pair(values, debug, "novio_place_of_residence", "novia_place_of_residence", residence_segment, "Usual place of residence row")
     _apply_address_pair(values, debug, "novio_foreign_address", "novia_foreign_address", foreign_segment, "Full/Foreign Address row")
     _apply_best_address_pair(values, debug, "novio_place_of_residence", "novia_place_of_residence", residence_segments, "Usual place of residence row")

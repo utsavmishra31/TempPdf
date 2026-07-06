@@ -75,8 +75,7 @@ def _clean_person_name(value: str) -> str:
     )[0]
     words = re.findall(r"[A-Za-z]+", text)
     stopwords = {
-        "MR", "MRS", "MS", "OR", "WA", "CSCS", "CANE", "THEATER", "SCHWS",
-        "CICCCECSSSEN", "SEVE", "THIS", "CERTIFY", "THAT",
+        "MR", "MRS", "MS", "OR", "THIS", "CERTIFY", "THAT",
     }
     cleaned: list[str] = []
     for word in words:
@@ -95,24 +94,18 @@ def _clean_medical_name(value: str) -> str:
     words = [word for word in re.split(r"[.\s]+", text) if len(word) > 1]
     normalized: list[str] = []
     for word in words:
-        if word.startswith("SECHATPREET") or word == "SEHAJPREET":
-            normalized.append("SEHAJPREET")
-            continue
-        if word in {"IKAYR", "KAURT", "KAUR"}:
-            normalized.append("KAUR")
-            continue
-        if len(word) >= 3 and word not in {"JESUSSCHANAESE", "CICCCECSSSEN"}:
+        if len(word) >= 3:
             normalized.append(word)
     return " ".join(normalized[:2])
 
 
 def _clean_medical_father_name(value: str) -> str:
     text = _clean_value(value).upper()
+    # Correct common OCR split of the surname SINGH only (generic, appears in many documents)
     text = text.replace("SIN GH", "SINGH").replace("SENGH", "SINGH")
     text = text.replace("ASIN GLH", "SINGH").replace("ASIN GH", "SINGH")
-    text = text.replace("SURSTT", "SURJIT").replace("SORSTT", "SURJIT").replace("SURTET", "SURJIT")
     words = re.findall(r"[A-Z]+", text)
-    cleaned = [word for word in words if len(word) > 1 and word not in {"BENEEEES", "CIS"}]
+    cleaned = [word for word in words if len(word) > 1]
     return " ".join(cleaned[:2])
 
 
@@ -211,17 +204,6 @@ def _extract_apostille_fields(text: str) -> tuple[dict[str, str], dict[str, dict
         if cleaned:
             values["signed_by"] = cleaned
             debug["signed_by"] = {**signed_by_meta, "value": cleaned, "confidence": 0.9}
-            break
-
-    sign_patterns = [
-        r"\b(Suresh\s+Kumar)\b",
-        r"\b([A-Za-z]resh\s+Kumar)\b",
-    ]
-    for pattern in sign_patterns:
-        sign_name, sign_meta = _pick_last_match(text, pattern)
-        if sign_name:
-            values["sign_name"] = "SURESH KUMAR"
-            debug["sign_name"] = {**sign_meta, "value": values["sign_name"], "confidence": 0.85}
             break
 
     apostille_date_pattern = r"([0-9]{1,2}[.\-'\s]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[.\-'\s]+20[0-9]{2})"

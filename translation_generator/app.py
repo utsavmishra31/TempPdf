@@ -29,6 +29,8 @@ from services.template_config import (
 from services.template_filler import fill_template
 from services.text_normalizer import normalize_text
 from utils.logger import get_logger
+from services.ocr_corrections import save_learned_correction
+from services.ocr_validator import validate_fields, cross_check_fields
 from io import BytesIO
 
 load_dotenv()
@@ -70,17 +72,26 @@ def _upload_source_kind(file_name: str, mime_type: str | None) -> str:
     return "unknown"
 
 
-def _extract_ocr_text(file_bytes: bytes | list[bytes], source_file_kind: str) -> str:
+def _extract_ocr_text(
+    file_bytes: bytes | list[bytes],
+    source_file_kind: str,
+    doc_type: str = "unknown",
+) -> tuple[str, list[str]]:
+    """Return (ocr_text, quality_warnings)."""
     if source_file_kind == "image":
         if isinstance(file_bytes, list):
             page_texts: list[str] = []
+            all_warnings: list[str] = []
             for page_index, image_bytes in enumerate(file_bytes, start=1):
-                page_texts.append(f"\n=== PAGE {page_index} ===\n{extract_text_from_image(image_bytes)}")
-            return "\n".join(page_texts)
-        return extract_text_from_image(file_bytes)
+                text, warnings = extract_text_from_image(image_bytes, doc_type=doc_type)
+                page_texts.append(f"\n=== PAGE {page_index} ===\n{text}")
+                all_warnings.extend(warnings)
+            return "\n".join(page_texts), all_warnings
+        text, warnings = extract_text_from_image(file_bytes, doc_type=doc_type)
+        return text, warnings
     if isinstance(file_bytes, list):
         raise RuntimeError("PDF processing requires one PDF file.")
-    return extract_text_with_ocr(file_bytes)
+    return extract_text_with_ocr(file_bytes, doc_type=doc_type)
 
 
 def _page_marker_text(text: str, page_number: int) -> str:
@@ -482,41 +493,19 @@ def _find_medical_stamp_digits(text: str) -> str:
         for match in re.finditer(r"(?:[O0][I1]|O1|01)([0-9OI]{7})", compact):
             digits = match.group(1).replace("O", "0").replace("I", "1")
             if digits.isdigit():
-                return {
-                    "4571641": "4576410",
-                    "1457644": "4576410",
-                }.get(digits, digits)
+                return digits
     return ""
 
 
 def _extract_birth_stamp_no_from_pdf(pdf_bytes: bytes) -> str:
     try:
-        import shutil
-
         import pytesseract
-        from pdf2image import convert_from_bytes
         from PIL import ImageFilter, ImageOps
+        from services.pdf_page_cache import get_pages
     except ImportError:
         return ""
 
-    poppler_path = None
-    if shutil.which("pdfinfo") is None:
-        for candidate in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]:
-            if Path(candidate, "pdfinfo").exists():
-                poppler_path = candidate
-                break
-
-    try:
-        pages = convert_from_bytes(
-            pdf_bytes,
-            dpi=300,
-            first_page=2,
-            last_page=2,
-            poppler_path=poppler_path,
-        )
-    except Exception:
-        return ""
-
+    pages = get_pages(pdf_bytes, dpi=250, first_page=2, last_page=2)
     if not pages:
         return ""
 
@@ -531,24 +520,18 @@ def _extract_birth_stamp_no_from_pdf(pdf_bytes: bytes) -> str:
     for box in crop_boxes:
         crop = page.crop(box)
         gray = ImageOps.grayscale(crop)
-        contrast = ImageOps.autocontrast(gray, cutoff=1)
+        auto = ImageOps.autocontrast(gray, cutoff=1)
         variants = [
-            crop,
-            gray,
-            contrast,
-            contrast.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN),
-            contrast.point(lambda pixel: 255 if pixel > 120 else 0),
-            contrast.point(lambda pixel: 255 if pixel > 150 else 0),
+            auto,
+            auto.point(lambda pixel: 255 if pixel > 130 else 0),
+            auto.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN),
         ]
         for variant in variants:
             image = variant.resize((variant.width * 3, variant.height * 3))
             for psm in (6, 7):
                 text = pytesseract.image_to_string(
                     image,
-                    config=(
-                        f"--oem 3 --psm {psm} "
-                        "-c tessedit_char_whitelist=0123456789OI "
-                    ),
+                    config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789OI ",
                 )
                 stamp_digits = _find_birth_stamp_digits(text)
                 if stamp_digits:
@@ -559,27 +542,25 @@ def _extract_birth_stamp_no_from_pdf(pdf_bytes: bytes) -> str:
 def _extract_medical_sticker_name_from_pdf(pdf_bytes: bytes) -> str:
     try:
         import pytesseract
-        from pdf2image import convert_from_bytes
         from PIL import ImageFilter, ImageOps
+        from services.pdf_page_cache import get_pages
     except ImportError:
         return ""
 
-    try:
-        from services.ocr_reader import _resolve_poppler_path
-
-        pages = convert_from_bytes(
-            pdf_bytes,
-            dpi=500,
-            poppler_path=_resolve_poppler_path(),
-        )
-    except Exception:
+    # All pages at 250 DPI — cache shared with medical stamp extraction below
+    pages = get_pages(pdf_bytes, dpi=250)
+    if not pages:
         return ""
 
     for page in reversed(pages):
         width, height = page.size
         crop = page.crop((int(width * 0.25), int(height * 0.70), int(width * 0.82), int(height * 0.81)))
         gray = ImageOps.autocontrast(ImageOps.grayscale(crop), cutoff=1)
-        variants = [crop, gray, gray.filter(ImageFilter.SHARPEN), gray.point(lambda pixel: 255 if pixel > 160 else 0)]
+        variants = [
+            gray,
+            gray.filter(ImageFilter.SHARPEN),
+            gray.point(lambda pixel: 255 if pixel > 160 else 0),
+        ]
         for variant in variants:
             image = variant.resize((variant.width * 2, variant.height * 2))
             try:
@@ -588,16 +569,12 @@ def _extract_medical_sticker_name_from_pdf(pdf_bytes: bytes) -> str:
                 continue
             match = re.search(r"issued\s+to\s+([A-Z][A-Z\s]{3,})", text, flags=re.I)
             if not match:
-                match = re.search(r"(?:SEHAJPREET|SEHALPREET|SEHAIPREET|SENAJPREET)\s+KAUR", text, flags=re.I)
-                if not match:
-                    continue
-                return "SEHAJPREET KAUR"
+                continue
             name = re.sub(r"[^A-Za-z\s]+", " ", match.group(1))
             words = [word.upper() for word in name.split() if len(word) > 1]
             if not words:
                 continue
-            cleaned = " ".join(words[:2]).replace("SEHALPREET", "SEHAJPREET").replace("SEHAIPREET", "SEHAJPREET")
-            cleaned = cleaned.replace("SENAJPREET", "SEHAJPREET").replace("KAURT", "KAUR")
+            cleaned = " ".join(words[:2])
             if cleaned:
                 return cleaned
     return ""
@@ -606,20 +583,14 @@ def _extract_medical_sticker_name_from_pdf(pdf_bytes: bytes) -> str:
 def _extract_medical_stamp_no_from_pdf(pdf_bytes: bytes) -> str:
     try:
         import pytesseract
-        from pdf2image import convert_from_bytes
         from PIL import ImageFilter, ImageOps
+        from services.pdf_page_cache import get_pages
     except ImportError:
         return ""
 
-    try:
-        from services.ocr_reader import _resolve_poppler_path
-
-        pages = convert_from_bytes(
-            pdf_bytes,
-            dpi=250,
-            poppler_path=_resolve_poppler_path(),
-        )
-    except Exception:
+    # Cache hit when called after _extract_medical_sticker_name_from_pdf
+    pages = get_pages(pdf_bytes, dpi=250)
+    if not pages:
         return ""
 
     for page in reversed(pages):
@@ -633,24 +604,18 @@ def _extract_medical_stamp_no_from_pdf(pdf_bytes: bytes) -> str:
         for box in crop_boxes:
             crop = page.crop(box)
             gray = ImageOps.grayscale(crop)
-            contrast = ImageOps.autocontrast(gray, cutoff=1)
+            auto = ImageOps.autocontrast(gray, cutoff=1)
             variants = [
-                crop,
-                gray,
-                contrast,
-                contrast.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN),
-                contrast.point(lambda pixel: 255 if pixel > 100 else 0),
-                contrast.point(lambda pixel: 255 if pixel > 130 else 0),
+                auto,
+                auto.point(lambda pixel: 255 if pixel > 120 else 0),
+                auto.filter(ImageFilter.SHARPEN).filter(ImageFilter.SHARPEN),
             ]
             for variant in variants:
                 image = variant.resize((variant.width * 3, variant.height * 3))
-                for psm in (6, 7, 11, 13):
+                for psm in (6, 7):
                     text = pytesseract.image_to_string(
                         image,
-                        config=(
-                            f"--oem 3 --psm {psm} "
-                            "-c tessedit_char_whitelist=0123456789OI "
-                        ),
+                        config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789OI ",
                     )
                     stamp_digits = _find_medical_stamp_digits(text)
                     if stamp_digits:
@@ -769,6 +734,8 @@ def init_session_state() -> None:
         "unfilled_placeholder_counts": {},
         "source_file_name": "",
         "allow_generate_with_missing_required": False,
+        "validation_issues": [],
+        "cross_check_warnings": [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -818,7 +785,8 @@ def run_pipeline(pdf_bytes: bytes | list[bytes], forced_doc_type: str | None = N
         ocr_auto_triggered = True
         logger.info("Direct extraction is short; trying OCR fallback")
         try:
-            ocr_text = _extract_ocr_text(pdf_bytes, source_file_kind)
+            ocr_text, ocr_quality_warnings = _extract_ocr_text(pdf_bytes, source_file_kind)
+            warnings.extend(ocr_quality_warnings)
             ocr_normalized = normalize_text(ocr_text)
             ocr_text_chars = len(ocr_normalized)
             # Use OCR when it produces stronger text, or direct text is effectively empty.
@@ -860,7 +828,8 @@ def run_pipeline(pdf_bytes: bytes | list[bytes], forced_doc_type: str | None = N
         if (extraction_sparse or pcc_apostille_sparse) and not used_ocr:
             logger.info("Extraction is sparse; forcing OCR reprocessing")
             try:
-                ocr_text = _extract_ocr_text(pdf_bytes, source_file_kind)
+                ocr_text, ocr_quality_warnings = _extract_ocr_text(pdf_bytes, source_file_kind, doc_type=effective_doc_type)
+                warnings.extend(ocr_quality_warnings)
                 ocr_normalized = normalize_text(ocr_text)
                 ocr_text_chars = len(ocr_normalized)
                 if len("".join(ocr_normalized.split())) >= direct_nonspace_chars:
@@ -1048,6 +1017,16 @@ def run_pipeline(pdf_bytes: bytes | list[bytes], forced_doc_type: str | None = N
         page2_image_bytes = pdf_bytes[1] if isinstance(pdf_bytes, list) and len(pdf_bytes) > 1 else None
         _apply_image_page2_apostille_fallback(fields, extraction_debug, normalized, warnings, page2_image_bytes)
 
+    # ── Field validation and cross-check (#7, #8) ─────────────────────────
+    validation_issues: list[dict[str, str]] = []
+    cross_check_warnings: list[str] = []
+    if fields:
+        try:
+            validation_issues = validate_fields(fields, effective_doc_type)
+            cross_check_warnings = cross_check_fields(fields, effective_doc_type)
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug("Validation skipped: %s", _exc)
+
     st.session_state.raw_text = raw_text
     st.session_state.normalized_text = normalized
     st.session_state.direct_text_chars = len(direct_normalized)
@@ -1069,6 +1048,8 @@ def run_pipeline(pdf_bytes: bytes | list[bytes], forced_doc_type: str | None = N
     st.session_state.pdf_path = ""
     st.session_state.unfilled_placeholders = []
     st.session_state.unfilled_placeholder_counts = {}
+    st.session_state.validation_issues = validation_issues
+    st.session_state.cross_check_warnings = cross_check_warnings
 
 
 def to_placeholder_data(doc_type: str, fields: dict[str, str]) -> dict[str, str]:
@@ -1337,6 +1318,11 @@ def render_editable_fields() -> None:
             new_fields[key] = st.text_input(label, value=value)
         save_clicked = st.form_submit_button("Save Field Edits")
         if save_clicked:
+            # Persist learned corrections: old OCR value → user-corrected value (#10)
+            for key, new_value in new_fields.items():
+                old_value = (fields.get(key) or "").strip()
+                if old_value and new_value and old_value != new_value:
+                    save_learned_correction(old_value, new_value)
             new_fields["doc_type"] = st.session_state.effective_doc_type
             st.session_state.fields = new_fields
             st.success("Field edits saved.")
@@ -1520,6 +1506,23 @@ def main() -> None:
         st.subheader("3) Editable extracted fields")
         render_editable_fields()
         _render_apostille_sticker_viewer()
+
+        # ── Field validation & cross-check (#7, #8) ───────────────────────
+        validation_issues = st.session_state.get("validation_issues", [])
+        cross_check_warnings = st.session_state.get("cross_check_warnings", [])
+        if validation_issues or cross_check_warnings:
+            with st.expander("⚠️ Field validation warnings", expanded=bool(validation_issues)):
+                if validation_issues:
+                    st.markdown("**Format issues detected:**")
+                    for issue in validation_issues:
+                        msg = f"• **{issue['field']}**: {issue['issue']}"
+                        if issue.get("suggestion"):
+                            msg += f" → suggested: `{issue['suggestion']}`"
+                        st.warning(msg)
+                if cross_check_warnings:
+                    st.markdown("**Cross-check warnings:**")
+                    for warn in cross_check_warnings:
+                        st.warning(f"• {warn}")
 
         missing_required = get_missing_required_fields(
             st.session_state.effective_doc_type,

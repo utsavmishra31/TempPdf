@@ -6,10 +6,27 @@ from schemas.pcc_schema import PCCSchema
 from utils.regex_helpers import find_first_with_meta
 
 RELATION_ES_MAP = {
-    "S/o": "hijo de",
-    "D/o": "hija de",
-    "W/o": "mujer de",
+    "S/O": "hijo de",
+    "D/O": "hija de",
+    "W/O": "mujer de",
 }
+
+
+def _normalize_relation(raw: str) -> str:
+    """
+    Normalise any OCR variant of S/o, D/o, W/o to a canonical uppercase key.
+    Handles: mixed case (S/o), digit-O confusion (S/0), embedded spaces (S / O).
+    """
+    text = re.sub(r"\s+", "", (raw or "").upper())
+    # Replace digit zero used instead of letter O
+    text = text.replace("/0", "/O")
+    if text in {"S/O", "SO"}:
+        return "S/O"
+    if text in {"D/O", "DO"}:
+        return "D/O"
+    if text in {"W/O", "WO"}:
+        return "W/O"
+    return text
 
 
 def _clean_value(value: str) -> str:
@@ -75,19 +92,19 @@ def _is_jalandhar_pcc(text: str) -> bool:
 
 
 def _extract_jalandhar_apostille_officer_name(text: str) -> tuple[str, dict[str, str | float]]:
-    pattern = r"\((Suresh\s+Kum(?:ar|a)?)\b[^)]{0,80}\((?:Attestation|Atrestation|Aliestatio)"
+    # Look for any name in parentheses immediately before an "Attestation" label —
+    # this is the signing officer block on Jalandhar PCC apostille pages.
+    pattern = r"\(([A-Z][A-Za-z\s.]{3,30}?)\)\s*[^(\n]{0,100}\((?:Attestation|Atrestation|Aliestatio|Section\s*Officer)"
     match = re.search(pattern, text or "", flags=re.IGNORECASE)
     if not match:
         return "", _fallback_meta("")
 
     sign_name = _clean_value(match.group(1)).upper()
-    if re.match(r"^SURESH\s+KUM", sign_name):
-        sign_name = "SURESH KUMAR"
     return sign_name, _meta_from_find(
         pattern,
         sign_name,
         _snippet(text, match.start(), match.end()),
-        0.9,
+        0.88,
     )
 
 
@@ -95,7 +112,7 @@ def _extract_main_pcc_record(text: str) -> dict[str, str | dict[str, dict[str, s
     compact = re.sub(r"\s+", " ", text)
     pattern = (
         r"there is no adverse information against\s+(?:Mr\.?|Ms\.?|Mrs\.?)?\s*"
-        r"([A-Za-z\s]+?)\s+(S/o|D/o|W/o)\s+([A-Za-z\s]+?),\s*holder of Indian Passport No\s*([A-Z0-9]+),"
+        r"([A-Za-z\s]+?)\s+([SDW]\s*/\s*[oO0])\s+([A-Za-z\s]+?),\s*holder of Indian Passport No\s*([A-Z0-9]+),"
         r"\s*issued at\s*[A-Za-z\s]+,\s*on\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})"
         r".*?ineligible for\s*([A-Za-z/\-\s]+?)\s+for"
     )
@@ -180,7 +197,7 @@ def _extract_jalandhar_main_pcc_record(text: str) -> dict[str, str | dict[str, d
     compact = re.sub(r"\s+", " ", text)
     pattern = (
         r"there is no adverse information against\s+(?:Mr\.?|Ms\.?|Mrs\.?)?\s*"
-        r"([A-Za-z\s]+?)\s+(S/o|D/o|W/o)\s+([A-Za-z\s]+?),\s*holder of Indian Passport No\s*([A-Z0-9][A-Z0-9\s]{4,20}),"
+        r"([A-Za-z\s]+?)\s+([SDW]\s*/\s*[oO0])\s+([A-Za-z\s]+?),\s*holder of Indian Passport No\s*([A-Z0-9][A-Z0-9\s]{4,20}),"
         r"\s*issued at\s*JALANDHAR\s*,\s*on\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})"
         r".*?ineligible\s*(?:\|\s*)?for\s*([A-Za-z/\-\s]+?)\s+for"
     )
@@ -270,7 +287,6 @@ def _extract_apostille_fields(text: str) -> tuple[str, str, str, dict[str, dict[
         r"\(([A-Z][A-Z.]{2,}\s+[A-Z.][A-Z\s.]{2,})\)[^\n]{0,60}(?:Attestation|Section)",
         # Two-word name in parens near apostille block (two-word guard prevents INDIA, CARDIOLOGY)
         r"\(([A-Z][A-Z.]{2,}\s+[A-Z.][A-Z\s.]{2,})\)",
-        r"\b(PRADIP\s+DAS)\b",
         r"firmado\s+por\s+([A-Za-z][A-Za-z\s.]{2,}?)\s*(?=\b(?:actuando|con\s+el\s+sello|$))",
         r"signed\s*by\s*[:\-]?\s*([A-Za-z][A-Za-z\s.]{2,}?)\s+acting\s+in\s+the\s+capacity",
         r"\bby\s+([A-Za-z][A-Za-z\s.]{2,}?)\s+acting\s+in\s+the\s+capacity",
@@ -505,7 +521,7 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         if key in (main_record.get("debug") or {}):
             debug[key] = (main_record.get("debug") or {}).get(key, debug[key])
 
-    values["relation_text_es"] = RELATION_ES_MAP.get(values["relation_text"], "")
+    values["relation_text_es"] = RELATION_ES_MAP.get(_normalize_relation(values["relation_text"]), "")
     debug["relation_text_es"] = {
         "value": values["relation_text_es"],
         "confidence": 0.99 if values["relation_text_es"] else 0.0,

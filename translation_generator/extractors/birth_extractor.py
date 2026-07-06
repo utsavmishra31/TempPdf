@@ -60,6 +60,15 @@ def _clean_birth_serial_no(value: str) -> str:
     if match:
         return "ES" + match.group(1)
 
+    # OCR frequently misreads digit 5 as letter S in the numeric portion.
+    # Normalise S→5 (and O→0, I→1) within the digit run after the ES prefix.
+    if compact.startswith(("ES", "E5")):
+        prefix = "ES"
+        rest = compact[2:].replace("S", "5").replace("O", "0").replace("I", "1")
+        match = re.search(r"ES([0-9]{6,})", prefix + rest)
+        if match:
+            return "ES" + match.group(1)
+
     digits = re.sub(r"\D+", "", compact)
     if len(digits) == 8 and re.search(r"[^0-9]\s*[0-9]", raw):
         return "ES" + digits
@@ -115,13 +124,17 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
 
     patterns: dict[str, list[str]] = {
         "register_no": [
-            r"(?:register(?:ed)?\s*no|registration\s*(?:no|number)|reg(?:istration)?\s*no)\s*[:\-]?\s*([A-Z0-9\-/]+)",
+            r"(?:register(?:ed)?\s*no|registration\s*(?:no|number)|reg(?:istration)?\s*no|Regls?w?ation\s+[Nn]o)"
+            r"\s*[:\-]?\s*([A-Z0-9\-/]+)",
             r"(BU/[A-Z]{1,3}/\d{2}/\d{8,})",
         ],
         "serial_no": [
             r"document\s*s(?:r|erial)\.?\s*(?:no|number)\s*[:\-]\s*([^\n|]+)",
+            r"[Dd]ocument\s+[^A-Za-z\n]{0,12}[Nn]o\.?\s*[:\-]?\s*([A-Z]{2}[0-9A-Z]{7,})",
             r"(?:serial\s*(?:no|number)|document\s*serial\s*(?:no|number)|n\.?\s*de\s*serie\s*del\s*documento)\s*[:\-]?\s*([A-Z0-9\-/]+)",
             r"(?:certificate\s*no|cert\s*no)\s*[:\-]?\s*([A-Z0-9\-/]+)",
+            # Bare ES-prefixed serial number as last resort
+            r"\b(ES[0-9]{7,})\b",
         ],
         "place": [
             r"\blocation\s*[:\-]\s*([A-Za-z][A-Za-z ]+)",
@@ -131,8 +144,8 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         "district": [r"district\s*[:\-]?\s*([A-Za-z\s]+?)(?:\s+of\b|[,\.\n]|$)"],
         "year": [r"(?:for\s*the\s*year|year)\s*[:\-]?\s*([0-9]{4})"],
         "child_name": [
-            r"(?:name\s*of\s*child|child\s*name|name\s*of\s*the\s*child)\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z\s]{2,})",
-            r"\b/name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z\s]{2,})",
+            r"(?:name\s*of\s*child|child\s*name|name\s*of\s*the\s*child)\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z ]{2,})",
+            r"\b/name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z ]{2,})",
         ],
         "sex": [
             r"\bsex\b\s*[:\-]?\s*(?:[^\n]*?\b)?(male|female|other)\b",
@@ -140,18 +153,22 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
             r"\bgender\s*of\s*child\b\s*[:\-]?\s*(?:[^\n]*?\b)?(male|female|other)\b",
         ],
         "father_name": [
-            r"father'?s?\s*name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z\s]{2,})",
-            r"\bS\/O\b\s*([A-Za-z\s]{3,})",
+            r"father'?s?\s*name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z ]{2,})",
+            r"\bS\/O\b\s*([A-Za-z ]{3,})",
         ],
         "grandfather_name": [
-            r"grand\s*father'?s?\s*name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z\s]{2,})",
-            r"(?:grand\s*father|grandfather)\s*[:\-]?\s*([A-Za-z\s]{3,})",
+            r"grand\s*father'?s?\s*name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z ]{2,})",
+            r"(?:grand\s*father|grandfather)\s*[:\-]?\s*([A-Za-z ]{3,})",
         ],
         "mother_name": [
-            r"mother'?s?\s*name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z\s]{2,})",
-            r"\bW\/O\b\s*([A-Za-z\s]{3,})",
+            r"mother'?s?\s*name\s*[:\-]?\s*(?:[^\n/]+/)?\s*([A-Za-z][A-Za-z ]{2,})",
+            r"\bW\/O\b\s*([A-Za-z ]{3,})",
         ],
-        "birth_date": [r"(?:birth\s*date|date\s*of\s*birth)\s*[:\-]?\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})"],
+        "birth_date": [
+            r"(?:birth\s*date|date\s*of\s*birth)\s*[:\-]?\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})",
+            # OCR sometimes merges DD and MM: "1903/2024" → treat as DDMM/YYYY
+            r"(?:birth\s*date|date\s*of\s*birth)\s*[:\-]?\s*([0-9]{4}/[0-9]{4})",
+        ],
         "birth_place": [
             r"(Tagore\s+Hospital\s+Sha\s*h?kot)",
             r"(?:birth\s*place|place\s*of\s*birth|hospital\s*name)\s*[:\-]?\s*([A-Za-z0-9,()\-\s]{3,})",
@@ -171,7 +188,6 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         ],
         "signature_name": [
             r"signed\s*by\s*[:\-]?\s*([A-Za-z\s.]+)",
-            r"(BRIJ\s+MOHAN)",
         ],
         "signature_date": [r"(?:sign\s*date|signature\s*date|date)\s*[:\-]?\s*([0-9]{1,2}[\-/][0-9]{1,2}[\-/][0-9]{2,4})"],
         "location": [
@@ -187,9 +203,7 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
             r"\bNo\.\s*([A-Z]{3,}[A-Z0-9\-/]+)\b",
         ],
         "apostille_sign": [
-            r"\b(PRADIP\s+DAS)\b",
             r"(?:signatory|signed\s*by)\s*[:\-]?\s*([A-Za-z\s.]+)",
-            r"(PRADIP\s+DAS)",
             r"has\s+been\s+signed\s+by\s+([A-Za-z\s.]+)",
         ],
         "signed_by": [
@@ -226,6 +240,29 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         serial_no = _clean_birth_serial_no(values["serial_no"])
         if serial_no:
             _override_value("serial_no", serial_no, "regex", "_clean_birth_serial_no", values["serial_no"], 0.9)
+
+    # Repair OCR-merged birth date "DDMM/YYYY" → "DD/MM/YYYY"
+    if values.get("birth_date") and re.fullmatch(r"[0-9]{4}/[0-9]{4}", values["birth_date"]):
+        raw = values["birth_date"]  # e.g. "1903/2024"
+        dd, mm, yyyy = raw[:2], raw[2:4], raw[5:]
+        try:
+            from datetime import date
+            date(int(yyyy), int(mm), int(dd))  # validate
+            fixed = f"{dd}/{mm}/{yyyy}"
+            _override_value("birth_date", fixed, "repair", "DDMM/YYYY→DD/MM/YYYY", raw, 0.8)
+        except (ValueError, IndexError):
+            pass
+
+    # serial_no line-level override: search each line for "Document" + ES number.
+    # More robust than full-text regex because it's confined to a single line,
+    # preventing cross-line false matches (e.g. from footer text).
+    for _line in text.splitlines():
+        _es_m = re.search(r"[Dd]ocument[^\n]{0,30}(ES[0-9A-Z]{7,})", _line, re.IGNORECASE)
+        if _es_m:
+            _cleaned_serial = _clean_birth_serial_no(_es_m.group(1))
+            if _cleaned_serial and _cleaned_serial.startswith("ES"):
+                _override_value("serial_no", _cleaned_serial, "ocr_line", "Document+ES", _es_m.group(0), 0.92)
+            break
 
     if values.get("district"):
         district = re.sub(r"\s+of\b.*$", "", values["district"], flags=re.I).strip(" ,.")
