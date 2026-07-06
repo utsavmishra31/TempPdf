@@ -114,10 +114,60 @@ def _clean_person_name(value: str) -> str:
     return " ".join(cleaned_words)
 
 
+def _is_person_name(value: str) -> bool:
+    return len(_clean_person_name(value).split()) >= 2
+
+
 def _clean_address(value: str) -> str:
     cleaned = _clean_text(value)
+    cleaned = cleaned.replace("!", "I").replace("’", " ")
+    cleaned = re.sub(r"\s*:\s*\d+\s*$", "", cleaned)
     cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r"\s+([,.])", r"\1", cleaned)
     return _clean_text(cleaned)
+
+
+def _clean_address_side(value: str) -> str:
+    cleaned = _clean_address(value)
+    slash_parts = [part for part in re.split(r"\s*/\s*", cleaned) if _clean_text(part)]
+    if len(slash_parts) > 1:
+        cleaned = slash_parts[-1]
+    starts = [
+        r"\bV\s*P\s*O\b",
+        r"\bVPO\b",
+        r"\bC\s+[A-Z0-9]",
+        r"\b[A-Z0-9][A-Z0-9\s./\-]{3,}\b(?:SPAIN|CANADA|USA|UNITED\s+KINGDOM|UK|ITALY|GERMANY|FRANCE|AUSTRALIA|NEW\s+ZEALAND)\b",
+    ]
+    for start_pattern in starts:
+        match = re.search(start_pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            cleaned = cleaned[match.start():]
+            break
+    if re.match(r"\bV\s*P\s*O\b|\bVPO\b", cleaned, flags=re.IGNORECASE):
+        cleaned = re.sub(r"\b(?:fs|fila|flr|fete|free|det|fifa|yarel|veers|shits|feba|waua|Ure)\b.*$", "", cleaned, flags=re.IGNORECASE)
+    else:
+        cleaned = re.sub(r"[’']?\s*(?:feta\s+fer\s+\d+|aded\s+fry\s+rena)\b", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(?:Abs|Ht|fs|fila|flr|fete|free|det|fifa|yarel|veers|shits|feba|waua|Ure|Wea|Waeug|wedug|vsnet|wares|geet|sete|feta|fer|wana|aded|fry|rena)\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = _clean_address(cleaned)
+    village_match = re.match(r"(VILLAGE\s+[A-Z0-9]+)\b.*?\b(MUTSADI\b.*)$", cleaned, flags=re.IGNORECASE)
+    if village_match:
+        cleaned = _clean_address(f"{village_match.group(1)} {village_match.group(2)}")
+    cleaned = re.sub(r"\b[a-z]\s+(?=DISTT\b)", "", cleaned)
+    return _clean_address(cleaned)
+
+
+def _address_segments_between(text: str, start_pattern: str, end_pattern: str) -> list[str]:
+    pattern = start_pattern + r"(.*?)" + end_pattern
+    matches = list(re.finditer(pattern, text, flags=re.IGNORECASE | re.DOTALL))
+    segments = [_clean_text(match.group(1)) for match in matches if _clean_text(match.group(1))]
+    return sorted(
+        segments,
+        key=lambda segment: (
+            bool(re.search(r"\b(?:VILLAGE|MUTSADI|CHUHEK|DISTT|SPAIN|CANADA|USA|UNITED|ITALY|GERMANY|FRANCE)\b", segment, flags=re.IGNORECASE)),
+            len(segment),
+        ),
+        reverse=True,
+    )
 
 
 def _clean_marriage_place(value: str) -> str:
@@ -175,13 +225,13 @@ def _apply_address_pair(
 ) -> None:
     if not segment:
         return
-    cleaned = _clean_address(segment)
+    cleaned = _clean_text(segment)
     split_match = re.search(r"\b(VILLAGE\s+[A-Za-z0-9].*)$", cleaned, flags=re.IGNORECASE)
     if split_match:
-        left_value = _clean_address(cleaned[: split_match.start()])
-        right_value = _clean_address(split_match.group(1))
+        left_value = _clean_address_side(cleaned[: split_match.start()])
+        right_value = _clean_address_side(split_match.group(1))
     else:
-        left_value = cleaned
+        left_value = _clean_address_side(cleaned)
         right_value = ""
     if left_value:
         values[left_key] = left_value
@@ -189,6 +239,25 @@ def _apply_address_pair(
     if right_value:
         values[right_key] = right_value
         debug[right_key] = _meta(right_value, "ocr_table", pattern, segment, 0.65)
+
+
+def _apply_best_address_pair(
+    values: dict[str, str],
+    debug: dict[str, dict[str, str | float]],
+    left_key: str,
+    right_key: str,
+    segments: list[str],
+    pattern: str,
+) -> None:
+    for segment in segments:
+        before = (values.get(left_key, ""), values.get(right_key, ""))
+        _apply_address_pair(values, debug, left_key, right_key, segment, pattern)
+        if values.get(left_key) and values.get(right_key):
+            debug[left_key]["confidence"] = 0.8
+            debug[right_key]["confidence"] = 0.8
+            return
+        if before != (values.get(left_key, ""), values.get(right_key, "")) and values.get(left_key):
+            continue
 
 
 def _apply_date_age_status(values: dict[str, str], debug: dict[str, dict[str, str | float]], compact_text: str) -> None:
@@ -300,14 +369,18 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         "designation": [r"Designation\s*[:;\-]?\s*([A-Za-z][A-Za-z\s]{2,}?)(?=\s+Date\s*[:;\-]|\n)"],
         "approv_date": [r"Designation\s*[:;\-]?\s*[A-Za-z][A-Za-z\s]{2,}?\s+Date\s*[:;\-]?\s*(" + DATE_TEXT + r")"],
         "location": [r"Location\s*[:;\-]?\s*([A-Za-z]+)"],
-        "reference_no": [r"(?:apostille\s*)?reference\s*(?:no|number)\s*[:;\-]?\s*([A-Z0-9\-/]+)", r"\bno\s+([0-9]{10,})\b"],
+        "reference_no": [
+            r"(?:apostille\s*)?reference\s*(?:no|number|n[°º.])\s*[:;\-]?\s*([A-Z0-9\-/]+)",
+            r"N[°º.]\s*([0-9]{8,15})",
+            r"\bno\s+([0-9]{10,})\b",
+        ],
         "apostille_sign": [
-            r"\(([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)\)\s*[^\n()]{0,80}(?:Section\s+Officer|Attestation)",
-            r"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)+)\s+(?:Section\s+Officer|Attestation)\b",
+            r"\(([A-Za-z][A-Za-z\s]{3,30}?)\)[\s\S]{0,500}(?:Attestation|Anestation|Section\s*Officer|Potion\s+Otticer|PV\s*Division|Ministry\s+of\s+External)",
+            r"([A-Za-z][A-Za-z\s]{3,30}?)\s*[\s\S]{0,160}(?:Section\s*Officer|Attestation|Anestation|PV\s*Division)",
         ],
         "signed_by": [
-            r"[hm]as\s+[^A-Za-z\n]{0,8}(?:been|oon)\W+signed\s+by\W+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,2})(?=\s*(?:[0-9]|set\b|in\b|the\b|capacity\b|$|\n))",
-            r"[hm]as\s+(?:been|oon)\s+signed\s+by\s*[^A-Za-z\n]{0,20}([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,2})(?=\s*(?:[0-9]|set\b|in\b|the\b|capacity\b|$|\n))",
+            r"[hm]as\s+[^A-Za-z\n]{0,10}(?:been|oon)[^A-Za-z\n]{0,10}signed\s+by[^A-Za-z\n]{0,10}([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,2})",
+            r"signed\s+by[^A-Za-z\n]{0,10}([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){1,2})",
         ],
         "apostille_date": [r"\bthe\s+([0-9OS]{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Noy|Dec)[a-z]*\s*20[0-9OS]{2})\b", r"\b([0-9OS]{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Noy|Dec)[a-z]*\s+20[0-9OS]{2})\b"],
         "stamp_no": [r"\b((?:[O0]I|OI|01)\s*[0-9OI]{7})\b"],
@@ -328,6 +401,8 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
             value = _clean_marriage_place(value)
         if key in {"name", "sign_name", "apostille_sign", "signed_by"}:
             value = _clean_person_name(value)
+        if key == "apostille_sign" and not _is_person_name(value):
+            continue
         if key == "reference_no":
             value = _normalize_reference(value)
         if key == "stamp_no":
@@ -340,12 +415,16 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
     mother_segment = _segment_between(compact, r"\b3\.?\s*Mother'?s\s+Name\b", r"\b4[.,]?\s*Usual\s+place")
     residence_segment = _segment_between(compact, r"\b4[.,]?\s*Usual\s+place\s+of\s+residence\b", r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b")
     foreign_segment = _segment_between(compact, r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b", r"\b6\.?\s*Date\s+Of\s+Birth")
+    residence_segments = _address_segments_between(compact, r"\b4[.,]?\s*Usual\s+place\s+of\s+residence\b", r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b")
+    foreign_segments = _address_segments_between(compact, r"\b5\.?\s*Full\s*/\s*Foreign\s+Address\b", r"\b6\.?\s*Date\s+Of\s+Birth")
 
     _apply_pair(values, debug, "novio_name", "novia_name", name_segment, "Name row")
     _apply_pair(values, debug, "novio_father", "novia_father", father_segment, "Father row")
     _apply_pair(values, debug, "novio_mother", "novia_mother", mother_segment, "Mother row")
     _apply_address_pair(values, debug, "novio_place_of_residence", "novia_place_of_residence", residence_segment, "Usual place of residence row")
     _apply_address_pair(values, debug, "novio_foreign_address", "novia_foreign_address", foreign_segment, "Full/Foreign Address row")
+    _apply_best_address_pair(values, debug, "novio_place_of_residence", "novia_place_of_residence", residence_segments, "Usual place of residence row")
+    _apply_best_address_pair(values, debug, "novio_foreign_address", "novia_foreign_address", foreign_segments, "Full/Foreign Address row")
     _apply_date_age_status(values, debug, compact)
 
     if not values.get("novia_father"):
@@ -363,6 +442,17 @@ def extract_fields(text: str) -> tuple[dict[str, str], list[str], dict[str, dict
         if foreign_address and not re.fullmatch(DATE_TEXT, foreign_address, flags=re.IGNORECASE):
             values["novio_foreign_address"] = _clean_address(foreign_address)
             debug["novio_foreign_address"] = {**foreign_meta, "value": values["novio_foreign_address"], "confidence": 0.75}
+
+    if not values.get("apostille_sign"):
+        for match in re.finditer(r"\(([A-Za-z][A-Za-z\s]{3,30}?)\)", normalized):
+            window = normalized[match.end(): match.end() + 500]
+            if not re.search(r"Attestation|Anestation|Section\s*Officer|Potion\s+Otticer|PV\s*Division|Ministry\s+of\s+External", window, flags=re.IGNORECASE):
+                continue
+            person = _clean_person_name(match.group(1))
+            if _is_person_name(person):
+                values["apostille_sign"] = person
+                debug["apostille_sign"] = _meta(person, "ocr_apostille", "parenthesized signer near officer block", match.group(0) + " " + _clean_text(window[:160]), 0.82)
+                break
 
     if values.get("apostille_date") == values.get("approv_date"):
         values["apostille_date"] = ""

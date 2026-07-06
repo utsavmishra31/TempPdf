@@ -23,7 +23,7 @@ def _find_poppler() -> str | None:
     return None
 
 
-def _render_page2(pdf_bytes: bytes, dpi: int = 250):
+def _render_page2(pdf_bytes: bytes, dpi: int = 350):
     """Return a PIL Image of page 2 at the given DPI, or None on failure."""
     try:
         from pdf2image import convert_from_bytes
@@ -54,6 +54,7 @@ def _make_variants(crop):
     # V1: plain gray — best for printed text (dates)
     yield up(gray)
     # V2: light threshold — suppresses rosette noise for dark stamp ink
+    yield up(gray.point(lambda p: 255 if p > 120 else 0))
     yield up(gray.point(lambda p: 255 if p > 130 else 0))
     # V3: medium threshold
     yield up(gray.point(lambda p: 255 if p > 150 else 0))
@@ -83,10 +84,12 @@ def _ocr_stamp(img) -> str:
 
 
 def _ocr_text(img) -> str:
-    """General OCR for dates and full text (PSM 11 = sparse text)."""
+    """General OCR for dates and full text."""
     try:
         import pytesseract
-        return pytesseract.image_to_string(img, config="--oem 3 --psm 11").strip()
+        sparse = pytesseract.image_to_string(img, config="--oem 3 --psm 11").strip()
+        block = pytesseract.image_to_string(img, config="--oem 3 --psm 6").strip()
+        return "\n".join(part for part in [sparse, block] if part)
     except Exception:
         return ""
 
@@ -101,6 +104,10 @@ _DATE_RES = [
     re.compile(
         r"\b(\d{1,2}[\-\s](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
         r"[a-z]*[\-\s]20\d{2})\b", re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b([0-9ITl]{1,2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+        r"[a-z]*[\-\s]*20[0-9OIS]{2})\b", re.IGNORECASE,
     ),
     re.compile(
         r"\bel\s+(\d{1,2}\s+de\s+[A-Za-záéíóú]+\s+de\s+20\d{2})\b",
@@ -131,11 +138,36 @@ def _find_stamp(text: str) -> str:
     return digits
 
 
+def _find_reference_no(text: str) -> str:
+    """Extract Indian MEA apostille reference number.
+    Typically printed as 'N° XXXXXXXXXX' or a standalone 10-15 digit sequence.
+    """
+    # Labeled pattern first: N° / No. followed by digits
+    m = re.search(
+        r"(?:N[°º.]\s*|(?:reference\s*(?:no|n[°º])?\s*[:.\-]?\s*))([0-9]{8,15})",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return m.group(1)
+    # Fallback: standalone 12–15 digit number (typical MEA reference length)
+    candidates = re.findall(r"(?<![0-9])([0-9]{12,15})(?![0-9])", text)
+    if candidates:
+        preferred = [candidate for candidate in candidates if candidate.startswith("20")]
+        candidate = max(preferred or candidates, key=len)
+        if len(candidate) == 13 and candidate.startswith("20"):
+            return candidate[:12]
+        return candidate
+    return ""
+
+
 def _find_date(text: str) -> str:
     for pat in _DATE_RES[:-1]:
         m = pat.search(text)
         if m:
-            return m.group(1).strip()
+            normalized = _normalize_date_text(m.group(1))
+            if normalized:
+                return normalized
     # Noisy "Date:" fallback
     m = _DATE_RES[-1].search(text)
     if m:
@@ -148,18 +180,83 @@ def _find_date(text: str) -> str:
     return ""
 
 
+def _normalize_date_text(value: str) -> str:
+    text = re.sub(r"\s+", " ", value).strip(" .,:;'\"()[]{}")
+    text = re.sub(r"(?i)Noy", "Nov", text)
+    text = re.sub(r"(?i)0ct", "Oct", text)
+    compact = re.match(r"([0-9ITlO]{1,2})\s*([A-Za-z]{3,9})[\-\s]*(20[0-9OS]{2})", text)
+    if compact:
+        day, month, year = compact.groups()
+        if "O" in day.upper():
+            return ""
+        day = day.replace("I", "1").replace("l", "1").replace("T", "1")
+        year = year.replace("O", "0").replace("S", "5")
+        try:
+            if not 1 <= int(day) <= 31:
+                return ""
+        except ValueError:
+            return ""
+        return f"{int(day):02d}-{month[:3].title()}-{year}"
+    return text
+
+
+def _date_score(value: str) -> int:
+    match = re.match(r"([0-9]{1,2})[-\s/][A-Za-z]{3,9}[-\s/](20[0-9]{2})", value or "")
+    if not match:
+        return 0
+    day = int(match.group(1))
+    score = 1
+    if day > 1:
+        score += 3
+    if re.search(r"\b20[2-9][0-9]\b", value):
+        score += 1
+    return score
+
+
+def _clean_person(value: str) -> str:
+    words = re.findall(r"[A-Za-z]+", value or "")
+    ignored = {
+        "ATTESTATION", "ANESTATION", "SECTION", "OFFICER", "POTION", "PV", "DIVISION",
+        "MINISTRY", "EXTERNAL", "AFFAIRS", "BEARS", "SEALSTAMP", "SEAL", "STAMP",
+        "GOVERNMENT", "GOVE", "INDIA", "PUNJAB", "CHANDIGARH", "DELHI", "THE",
+    }
+    kept: list[str] = []
+    for word in words:
+        upper = word.upper()
+        if len(upper) <= 2 or upper in ignored:
+            continue
+        kept.append(upper)
+        if len(kept) >= 4:
+            break
+    return " ".join(kept) if len(kept) >= 2 else ""
+
+
+def _find_apostille_sign(text: str) -> str:
+    patterns = [
+        r"\(([A-Za-z][A-Za-z\s]{3,30}?)\)[\s\S]{0,500}(?:Attestation|Anestation|Section\s*Officer|Potion\s+Otticer|PV\s*Division|Ministry\s+of\s+External)",
+        r"([A-Za-z][A-Za-z\s]{3,30}?)\s*[\s\S]{0,160}(?:Section\s*Officer|Attestation|Anestation|PV\s*Division)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            person = _clean_person(match.group(1))
+            if person:
+                return person
+    return ""
+
+
 def extract_apostille_from_pdf(pdf_bytes: bytes) -> dict[str, str]:
     """
     Main entry point.  Renders page 2, crops to the apostille sticker area,
     applies 5 preprocessing variants, and returns a dict with keys
-    'stamp_no' and 'apostille_date'.  Empty string = not found.
+    'stamp_no', 'apostille_date', 'reference_no', and 'apostille_sign'.
+    Empty string = not found.
 
     Runs at most 10 OCR calls → typically completes in 5–25 seconds.
-    Stops early the moment both values are found.
+    Stops early the moment stamp_no and apostille_date are found.
     """
-    result: dict[str, str] = {"stamp_no": "", "apostille_date": ""}
+    result: dict[str, str] = {"stamp_no": "", "apostille_date": "", "reference_no": "", "apostille_sign": ""}
 
-    page = _render_page2(pdf_bytes, dpi=250)
+    page = _render_page2(pdf_bytes, dpi=350)
     if page is None:
         return result
 
@@ -176,10 +273,15 @@ def extract_apostille_from_pdf(pdf_bytes: bytes) -> dict[str, str]:
         text = _ocr_text(variant)
         if not result["stamp_no"]:
             result["stamp_no"] = _find_stamp(text)
-        if not result["apostille_date"]:
-            result["apostille_date"] = _find_date(text)
-        # Stop as soon as both are found
-        if result["stamp_no"] and result["apostille_date"]:
+        date_candidate = _find_date(text)
+        if date_candidate and _date_score(date_candidate) >= _date_score(result["apostille_date"]):
+            result["apostille_date"] = date_candidate
+        if not result["reference_no"]:
+            result["reference_no"] = _find_reference_no(text)
+        if not result["apostille_sign"]:
+            result["apostille_sign"] = _find_apostille_sign(text)
+        # Stop as soon as stamp and date are found (reference is best-effort)
+        if result["stamp_no"] and result["apostille_date"] and result["apostille_sign"]:
             return result
 
     return result

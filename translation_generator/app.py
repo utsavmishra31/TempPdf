@@ -934,6 +934,66 @@ def run_pipeline(pdf_bytes: bytes | list[bytes], forced_doc_type: str | None = N
             except Exception as _exc:  # noqa: BLE001
                 logger.debug("Apostille crop OCR skipped: %s", _exc)
 
+    if effective_doc_type == "marriage" and fields and source_file_kind == "pdf":
+        _stamp_missing = not (fields.get("stamp_no") or "").strip()
+        _date_missing = not (fields.get("apostille_date") or "").strip()
+        _ref_missing = not (fields.get("reference_no") or "").strip()
+        _sign_missing = not (fields.get("apostille_sign") or "").strip()
+        if (_stamp_missing or _date_missing or _ref_missing or _sign_missing) and pdf_bytes:
+            try:
+                from services.apostille_crop_ocr import extract_apostille_from_pdf
+                crop_result = extract_apostille_from_pdf(pdf_bytes)
+                if _stamp_missing and crop_result.get("stamp_no"):
+                    fields["stamp_no"] = crop_result["stamp_no"]
+                    extraction_debug["stamp_no"] = {
+                        "value": crop_result["stamp_no"],
+                        "confidence": 0.75,
+                        "method": "crop_ocr",
+                        "pattern": "image preprocessing (page 2 sticker area)",
+                        "source_snippet": "Marriage apostille sticker — image crop + noise removal",
+                    }
+                    warnings.append(
+                        f"Marriage apostille stamp number extracted via image crop: {crop_result['stamp_no']}"
+                    )
+                if _date_missing and crop_result.get("apostille_date"):
+                    fields["apostille_date"] = crop_result["apostille_date"]
+                    extraction_debug["apostille_date"] = {
+                        "value": crop_result["apostille_date"],
+                        "confidence": 0.75,
+                        "method": "crop_ocr",
+                        "pattern": "image preprocessing (page 2 sticker area)",
+                        "source_snippet": "Marriage apostille sticker — image crop + noise removal",
+                    }
+                    warnings.append(
+                        f"Marriage apostille date extracted via image crop: {crop_result['apostille_date']}"
+                    )
+                if _ref_missing and crop_result.get("reference_no"):
+                    fields["reference_no"] = crop_result["reference_no"]
+                    extraction_debug["reference_no"] = {
+                        "value": crop_result["reference_no"],
+                        "confidence": 0.70,
+                        "method": "crop_ocr",
+                        "pattern": "image preprocessing (page 2 sticker area)",
+                        "source_snippet": "Marriage apostille sticker — reference number",
+                    }
+                    warnings.append(
+                        f"Marriage apostille reference number extracted via image crop: {crop_result['reference_no']}"
+                    )
+                if _sign_missing and crop_result.get("apostille_sign"):
+                    fields["apostille_sign"] = crop_result["apostille_sign"]
+                    extraction_debug["apostille_sign"] = {
+                        "value": crop_result["apostille_sign"],
+                        "confidence": 0.70,
+                        "method": "crop_ocr",
+                        "pattern": "image preprocessing (page 2 sticker area)",
+                        "source_snippet": "Marriage apostille sticker — official signature block",
+                    }
+                    warnings.append(
+                        f"Marriage apostille signer extracted via image crop: {crop_result['apostille_sign']}"
+                    )
+            except Exception as _exc:  # noqa: BLE001
+                logger.debug("Marriage apostille crop OCR skipped: %s", _exc)
+
     if effective_doc_type == "birth" and fields and source_file_kind == "pdf":
         _stamp_missing = not (fields.get("stamp_no") or "").strip()
         if _stamp_missing and pdf_bytes:
