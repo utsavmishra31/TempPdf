@@ -14,6 +14,32 @@ const SPANISH_MONTHS = [
   "noviembre",
   "diciembre",
 ];
+const ENGLISH_MONTH_INDEX = {
+  jan: 0,
+  january: 0,
+  feb: 1,
+  february: 1,
+  mar: 2,
+  march: 2,
+  apr: 3,
+  april: 3,
+  may: 4,
+  jun: 5,
+  june: 5,
+  jul: 6,
+  july: 6,
+  aug: 7,
+  august: 7,
+  sep: 8,
+  sept: 8,
+  september: 8,
+  oct: 9,
+  october: 9,
+  nov: 10,
+  november: 10,
+  dec: 11,
+  december: 11,
+};
 const TYPE_OPTIONS = [
   "VISADO DE TURISTA",
   "VISADO / ESTANCIA A LARGO PLAZO",
@@ -323,7 +349,7 @@ function humanizePlaceholder(token) {
 function collectReplacements() {
   const replacements = {};
   dom.fieldForm.querySelectorAll("[data-placeholder]").forEach((field) => {
-    replacements[field.dataset.placeholder] = field.value;
+    replacements[field.dataset.placeholder] = normalizeDateValue(field.value);
   });
   return { ...replacements, ...getAutomaticDateReplacements() };
 }
@@ -355,7 +381,7 @@ function applyBulkInput() {
 function parseBulkPlaceholderValues(input) {
   const values = {};
   const text = input || "";
-  const markerPattern = /<<[^<>]+>>\s*=/g;
+  const markerPattern = /<<[^<>]+>>\s*(?:=|\u2192)/g;
   const markers = Array.from(text.matchAll(markerPattern));
 
   markers.forEach((marker, index) => {
@@ -376,11 +402,24 @@ function parseBulkPlaceholderValues(input) {
 }
 
 function cleanBulkValue(value) {
-  return value
+  const cleaned = value
     .replace(/^\s*[,;|]+\s*/, "")
     .replace(/\s*[,;|]+\s*$/, "")
     .replace(/[ \t]+\n/g, "\n")
     .trim();
+
+  return normalizeDateValue(cleaned);
+}
+
+function normalizeDateValue(value) {
+  const dateMatch = String(value || "").trim().match(/^(\d{1,2})[-\s]([A-Za-z]{3,9})[-\s](\d{4})$/);
+  if (!dateMatch) return value;
+
+  const monthIndex = ENGLISH_MONTH_INDEX[dateMatch[2].toLowerCase()];
+  if (monthIndex === undefined) return value;
+
+  const day = dateMatch[1].padStart(2, "0");
+  return `${day} de ${SPANISH_MONTHS[monthIndex]} de ${dateMatch[3]}`;
 }
 
 function hasFieldForPlaceholder(placeholder) {
