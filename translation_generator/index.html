@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manual Template Filler</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/docx-preview@0.3.6/dist/docx-preview.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <section class="tool-panel" aria-labelledby="appTitle">
+      <div class="topbar">
+        <div>
+          <p class="eyebrow">Spanish Translation Templates</p>
+          <h1 id="appTitle">Manual Template Filler</h1>
+        </div>
+        <span class="status-pill">Frontend only</span>
+      </div>
+
+      <div class="template-strip">
+        <label class="select-field" for="templateSelect">
+          <span>Template</span>
+          <select id="templateSelect" autocomplete="off">
+            <option value="">Choose template</option>
+          </select>
+        </label>
+        <div class="template-meta" id="templateMeta">Select a template to load its placeholders.</div>
+      </div>
+
+      <div class="entry-tabs" id="entryTabs" hidden>
+        <div class="tab-list" role="tablist" aria-label="Entry mode">
+          <button type="button" class="tab-button active" id="bulkTab" data-tab="bulk" role="tab" aria-selected="true" aria-controls="bulkPanel">Bulk Paste</button>
+          <button type="button" class="tab-button" id="fieldsTab" data-tab="fields" role="tab" aria-selected="false" aria-controls="fieldsPanel">Empty Fields</button>
+        </div>
+
+        <section class="tab-panel" id="bulkPanel" role="tabpanel" aria-labelledby="bulkTab">
+          <label class="bulk-field" for="bulkInput">
+            <span>Paste placeholders and values</span>
+            <textarea id="bulkInput"></textarea>
+          </label>
+          <div class="bulk-actions">
+            <button type="button" class="secondary-action" id="applyBulk">Autofill Fields</button>
+            <button type="button" class="ghost-action" id="clearBulk">Clear Box</button>
+          </div>
+          <p class="bulk-result" id="bulkResult" aria-live="polite"></p>
+        </section>
+
+        <section class="tab-panel" id="fieldsPanel" role="tabpanel" aria-labelledby="fieldsTab" hidden>
+          <form class="field-grid" id="fieldForm"></form>
+        </section>
+      </div>
+
+      <div class="actions" id="actions" hidden>
+        <button type="button" class="primary-action" id="downloadDocx">Download MS Word</button>
+        <button type="button" class="secondary-action" id="downloadPdf">Download PDF</button>
+        <button type="button" class="ghost-action" id="resetForm">Clear Fields</button>
+      </div>
+
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="preview-shell" id="previewShell" aria-labelledby="previewTitle" hidden>
+      <div class="preview-heading">
+        <div>
+          <p class="eyebrow">Preview</p>
+          <h2 id="previewTitle">Generated Document</h2>
+        </div>
+        <span id="previewBadge">Ready</span>
+      </div>
+      <div class="doc-preview" id="docPreview"></div>
+    </section>
+  </main>
+</body>
+</html>
