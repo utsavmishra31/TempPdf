@@ -1,0 +1,7 @@
+[build]
+  publish = "translation_generator"
+
+[[headers]]
+  for = "/templates/*.docx"
+  [headers.values]
+    Content-Type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
