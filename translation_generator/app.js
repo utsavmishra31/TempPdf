@@ -53,6 +53,38 @@ const TYPE_OPTIONS = [
 const TITLE_OPTIONS = ["Sr.", "Sra."];
 const RELATION_OPTIONS = ["hijo de", "hija de", "mujer de"];
 const REGISTRAR_OPTIONS = ["Sub Registrador", "Local Registrador", "Registrador Local (EOMC)"];
+const DROPDOWN_VALUE_ALIASES = {
+  "<<TITLE>>": [
+    { value: "Sr.", aliases: ["Mr.", "Mr", "Mister", "Shri", "Sh."] },
+    { value: "Sra.", aliases: ["Ms.", "Ms", "Mrs.", "Mrs", "Miss", "Madam", "Smt.", "Smt"] },
+  ],
+  "<<RELATION>>": [
+    { value: "hijo de", aliases: ["S/o", "S / O", "Son of", "Son"] },
+    { value: "hija de", aliases: ["D/o", "D / O", "Daughter of", "Daughter"] },
+    { value: "mujer de", aliases: ["W/o", "W / O", "Wife of", "Wife", "Spouse of", "Spouse"] },
+  ],
+  "<<TYPE>>": [
+    { value: "VISADO DE TURISTA", aliases: ["Tourist Visa", "Tourism Visa", "Visitor Visa", "Visit Visa"] },
+    { value: "VISADO / ESTANCIA A LARGO PLAZO", aliases: ["Long Term Visa", "Long-Term Visa", "Long Term Stay", "Long-Term Stay", "Long Stay Visa"] },
+    {
+      value: "FINES DE INMIGRACIÓN DISTINTOS DE LA CIUDADANÍA",
+      aliases: ["Immigration Purposes Other Than Citizenship", "Immigration Other Than Citizenship", "Immigration Purpose", "Immigration Purposes"],
+    },
+    {
+      value: "SOLICITUD DE CIUDADANÍA/NACIONALIDAD",
+      aliases: ["Citizenship Application", "Nationality Application", "Citizenship/Nationality Application", "Application for Citizenship", "Application for Nationality"],
+    },
+    { value: "PERMISO DE RESIDENCIA", aliases: ["Residence Permit", "Residency Permit", "Resident Permit"] },
+    { value: "EMPLEO / VISADO DE EMPLEO / PERMISO DE TRABAJO", aliases: ["Employment", "Employment Visa", "Work Permit", "Work Visa", "Employment Permit"] },
+    { value: "EDUCACIÓN / INVESTIGACIÓN", aliases: ["Education", "Research", "Education/Research", "Study", "Student Visa"] },
+    { value: "VIAJAR al", aliases: ["Travel To", "Traveling To", "Travelling To", "To Travel"] },
+  ],
+  "<<REGISTRAR>>": [
+    { value: "Sub Registrador", aliases: ["Sub Registrar", "Sub-Registrar"] },
+    { value: "Local Registrador", aliases: ["Local Registrar"] },
+    { value: "Registrador Local (EOMC)", aliases: ["Local Registrar (EOMC)", "Registrar Local EOMC", "EOMC Local Registrar"] },
+  ],
+};
 
 const TEMPLATE_OPTIONS = {
   "pcc-jalandhar": {
@@ -430,13 +462,42 @@ function setFieldValue(placeholder, value) {
   const field = dom.fieldForm.querySelector(`[data-placeholder="${cssEscape(placeholder)}"]`);
   if (!field || isAutomaticDatePlaceholder(placeholder)) return;
 
-  field.value = value;
+  const normalizedValue = normalizeDropdownValue(placeholder, value);
+  field.value = normalizedValue;
   const card = field.closest(".field-card");
   const select = card ? card.querySelector("select") : null;
   if (select) {
-    const hasOption = Array.from(select.options).some((option) => option.value === value);
-    select.value = hasOption ? value : "";
+    const hasOption = Array.from(select.options).some((option) => option.value === normalizedValue);
+    select.value = hasOption ? normalizedValue : "";
   }
+}
+
+function normalizeDropdownValue(placeholder, value) {
+  const options = getDropdownOptions(placeholder);
+  if (!options.length) return value;
+
+  const trimmedValue = String(value || "").trim();
+  if (!trimmedValue) return trimmedValue;
+
+  const normalizedValue = getDropdownLookupKey(trimmedValue);
+  const matchingOption = options.find((option) => getDropdownLookupKey(option) === normalizedValue);
+  if (matchingOption) return matchingOption;
+
+  const aliasMatch = (DROPDOWN_VALUE_ALIASES[placeholder] || []).find(({ aliases }) => {
+    return aliases.some((alias) => getDropdownLookupKey(alias) === normalizedValue);
+  });
+
+  return aliasMatch ? aliasMatch.value : trimmedValue;
+}
+
+function getDropdownLookupKey(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 function cssEscape(value) {
